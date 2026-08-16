@@ -58,11 +58,8 @@ vesc_to_odom_node:
     steering_angle_to_servo_gain: -1.2135
     steering_angle_to_servo_offset: 0.5004
     publish_tf: true
-    # TODO(실측 필요): use_servo_cmd_to_calc_angular_velocity 기본값이 true라서
-    # vesc_to_odom_node가 wheelbase(앞뒤 바퀴 축간거리, 미터)를 필수로 요구한다.
-    # 아래 0.26은 1/10 스케일 RC 섀시 통상값을 넣어둔 자리표시값이며 실차 치수가
-    # 아니다 — 실제 xycar 차대를 줄자로 재서 반드시 갱신할 것.
-    wheelbase: 0.26
+    # [실측] 앞뒤 바퀴 축간거리, 미터. 2026-08-16 실차 줄자 측정: 33.3cm
+    wheelbase: 0.333
 
 xycar_motor:
   ros__parameters:

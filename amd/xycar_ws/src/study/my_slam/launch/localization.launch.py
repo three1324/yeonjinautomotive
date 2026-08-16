@@ -30,10 +30,13 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument('map', default_value=default_map,
                               description='지도 경로 (확장자 제외)'),
-        DeclareLaunchArgument('laser_x', default_value='0.20',
-                              description='base_link->laser x (m) ★실측 필요'),
+        # [실측] mapping.launch.py 와 동일해야 한다 (다르면 지도와 측위가 어긋난다).
+        #   축거 33.3cm + 앞바퀴축에서 라이다까지 8.5cm = 0.418 m
+        DeclareLaunchArgument('laser_x', default_value='0.418',
+                              description='base_link(뒷바퀴축)->laser x (m)'),
         DeclareLaunchArgument('laser_y', default_value='0.0'),
-        DeclareLaunchArgument('laser_z', default_value='0.10'),
+        DeclareLaunchArgument('laser_z', default_value='0.10',
+                              description='★아직 미실측'),
         DeclareLaunchArgument('laser_frame', default_value='laser_frame'),
         DeclareLaunchArgument('start_x', default_value='0.0'),
         DeclareLaunchArgument('start_y', default_value='0.0'),

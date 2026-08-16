@@ -397,8 +397,8 @@ python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.30
 
 | 항목 | 위치 | 왜 필요한가 |
 |---|---|---|
-| **wheelbase 실측** | `xycar_motor/config/vesc.yaml` | 현재 `0.26`은 **자리표시값**. `vesc_to_odom`이 각속도를 `v/wheelbase·tan(δ)`로 계산하므로, 틀리면 회전량이 누적 오차가 되고 **SLAM 지도가 휘거나 loop closure가 실패**한다. 줄자로 앞뒤 바퀴 중심 간 거리를 잴 것. |
-| **라이다 장착 위치** | `base_link→laser` static TF | 미설정. 틀리면 스캔이 어긋난 위치에 찍혀 지도가 흐려진다. |
+| ~~wheelbase~~ | `xycar_motor/config/vesc.yaml` | ✅ **완료 (2026-08-16): 0.333 m** (실측 33.3cm) |
+| **라이다 장착 위치** | `my_slam/launch/*.launch.py` | ✅ x=0.418, y=0.0 (실측: 축거 33.3 + 앞바퀴축 앞 8.5cm)<br>⚠️ **z(높이)는 아직 미실측** — 지면에서 라이다 중심까지 재서 갱신할 것 |
 | **VESC 펌웨어 전압 컷오프** | 실기기 (`old_vesc_tool`) | `reference/docs/모터제어기_VESC_설정방법.pdf` 절차대로. 현재 백업(`2026_0617_vesc_Motor_cfg.xml`)은 PDF 기준과 다름 (`l_max_vin` 15V ↔ 30V 등). ROS 파라미터가 아니라 펌웨어에 굽는 값이라 코드로 못 고친다. |
 | **VESC 시리얼 포트** | `xycar_motor/config/vesc.yaml` | UART 로 교체했다면 `/dev/ttyTHS1` 등으로 바꿔야 한다. 아래 별도 절 참고. |
 | **`center_bias_px`** | `my_perception` 파라미터 | 카메라가 차량 중심선에서 벗어나 장착됐을 때의 보정. 트랙 중앙에 정지시켜 놓고 offset을 읽어 그 값을 넣으면 0이 목표가 된다. |

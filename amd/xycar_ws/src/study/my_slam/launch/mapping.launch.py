@@ -36,16 +36,18 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration('rviz')
 
     args = [
-        # ★ 실측 필수 ★
-        # 기존 shortcut_slam 에는 x=0.43 으로 되어 있었으나, 1/10 스케일 RC카의
-        # wheelbase 가 26cm 안팎인 것을 감안하면 차체 밖이라 의심스럽다.
-        # 뒷바퀴 축(base_link) 에서 라이다까지의 실제 거리를 재서 넣을 것.
-        # 이 값이 틀리면 스캔이 어긋난 위치에 찍혀 지도가 흐려지고 측위 오차가 생긴다.
-        DeclareLaunchArgument('laser_x', default_value='0.20',
-                              description='base_link->laser x (m) ★실측 필요'),
-        DeclareLaunchArgument('laser_y', default_value='0.0'),
+        # [실측] 2026-08-16 실차 측정.
+        #   축거(뒷바퀴축→앞바퀴축) 33.3cm, 라이다는 앞바퀴축에서 8.5cm 앞.
+        #   base_link 는 뒷바퀴 축이므로  x = 0.333 + 0.085 = 0.418 m
+        #   (기존 shortcut_slam 의 0.43 이 실측값에 가까웠던 것으로 확인됨)
+        # y: 차량 중앙에 장착되어 0.
+        # z: 지면에서 라이다 중심까지 높이 — 아직 미측정, 재서 갱신할 것.
+        DeclareLaunchArgument('laser_x', default_value='0.418',
+                              description='base_link(뒷바퀴축)->laser x (m)'),
+        DeclareLaunchArgument('laser_y', default_value='0.0',
+                              description='차량 중앙 장착이므로 0'),
         DeclareLaunchArgument('laser_z', default_value='0.10',
-                              description='base_link->laser z (m) ★실측 필요'),
+                              description='base_link->laser z (m) ★아직 미실측'),
         DeclareLaunchArgument('laser_frame', default_value='laser_frame'),
         DeclareLaunchArgument('use_ekf', default_value='false'),
         DeclareLaunchArgument('rviz', default_value='true'),
