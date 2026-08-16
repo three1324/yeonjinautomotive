@@ -66,7 +66,9 @@ class DriverNode(Node):
             namespace="",
             parameters=[
                 ("control_hz", 30.0),
-                ("image_width", 632),
+                # 젯슨 실기기 카메라는 640x480 (2026-08-16 확인).
+                # 튜닝에 쓴 테스트 영상은 632였으나 실차 기준으로 맞춘다.
+                ("image_width", 640),
                 ("require_enable", True),
                 ("stale_timeout_sec", 0.5),
                 ("lane_lost_stop_sec", 2.0),

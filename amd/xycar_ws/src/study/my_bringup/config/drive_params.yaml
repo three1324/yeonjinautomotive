@@ -89,7 +89,11 @@ obstacle_node:
 driver_node:
   ros__parameters:
     control_hz: 30.0        # [고정] 제어 주기. 카메라 30fps와 맞춤
-    image_width: 632        # [실측] 카메라 실제 폭. 640이 아니라 632인 것 확인됨
+    image_width: 640
+    # ↑ [실측] 젯슨 실기기에서 /image_raw 로 확인한 실제 폭 (2026-08-16).
+    #   튜닝에 쓴 테스트 영상은 632였지만 실차 카메라는 640이다.
+    #   차선 오프셋이 이 값의 절반을 화면 중심으로 삼으므로, 틀리면 조향이
+    #   계통적으로 한쪽으로 치우친다.
     require_enable: true
     # ↑ [고정] true면 /drive_enable 을 받기 전까지 speed 0 을 계속 발행한다.
     #   실차에서 갑자기 튀어나가는 것을 막는 안전장치. 실전에서 반드시 true.
