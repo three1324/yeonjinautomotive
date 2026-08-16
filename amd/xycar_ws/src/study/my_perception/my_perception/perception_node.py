@@ -51,6 +51,8 @@ class PerceptionNode(Node):
                 ("lane.min_span", 20),
                 ("lane.hold_frames", 15),
                 ("lane.half_alpha", 0.05),
+                ("lane.max_center_offset_px", 480.0),
+                ("lane.max_jump_px", 250.0),
                 # 신호등 투표
                 ("light.window", 30),
                 ("light.min_weight", 3.0),
@@ -128,6 +130,8 @@ class PerceptionNode(Node):
             min_span=g("lane.min_span").value,
             hold_frames=g("lane.hold_frames").value,
             half_alpha=g("lane.half_alpha").value,
+            max_center_offset_px=g("lane.max_center_offset_px").value,
+            max_jump_px=g("lane.max_jump_px").value,
         )
 
     def on_image(self, msg):

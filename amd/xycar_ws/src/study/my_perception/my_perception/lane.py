@@ -68,7 +68,24 @@ class LaneEstimator:
       2. dashed만                   -> dashed 곡선 (트랙 중앙과 3px 일치), quality 0.9
       3. 좌우 solid만               -> 두 곡선의 중점, quality 0.8
       4. 한쪽 solid만               -> 학습된 행별 반폭으로 보완, quality 0.4
+                                       (+ 이상치 방어. 아래 설명 참고)
       5. 아무것도 없음              -> 직전 값 유지(hold), valid=False
+
+    이상치 방어 (모든 경로 공통):
+        피팅이 실패하면 말도 안 되는 값이 나온다. 실측(테스트영상 428프레임):
+            |offset| 최대 746px, 프레임간 변화 최대 1158px
+        화면 폭이 632px인데 746px 오차면 트랙이 화면 밖 한참 너머라는 뜻이고,
+        0.5초 만에 1158px 이동은 물리적으로 불가능하다.
+
+        **극단값은 quality 0.9(노란선만 보임) 경로에서 나온다** — 저신뢰 경로인
+        4번(한쪽 흰선만, 최대 242px)이 아니다. 급커브에서 좌우 경계선이 번갈아
+        사라질 때 노란선 하나로 피팅하면서, 화면 밖으로 나가는 부분을 **외삽**
+        하다가 2차 다항식이 발산하기 때문이다.
+
+        그래서 두 가지 상한을 둔다:
+          - max_center_offset_px : 화면 중심에서 이만큼 넘게 벗어난 추정은 기각
+          - max_jump_px          : 직전 채택값에서 이만큼 넘게 튄 추정은 기각
+        기각되면 hold 로 넘어간다 (직전 값 유지).
     """
 
     def __init__(
@@ -84,6 +101,8 @@ class LaneEstimator:
         min_span=20,
         hold_frames=15,
         half_alpha=0.05,
+        max_center_offset_px=480.0,
+        max_jump_px=250.0,
     ):
         self.width = width
         self.height = height
@@ -98,15 +117,29 @@ class LaneEstimator:
         self.min_span = min_span
         self.hold_frames = hold_frames
         self.half_alpha = half_alpha        # 행별 반폭 EMA 계수
+        # 화면 중심에서 이만큼 넘게 벗어난 추정은 피팅 실패로 보고 기각
+        self.max_center_offset_px = max_center_offset_px
+        # 직전 채택값에서 이만큼 넘게 튄 추정은 기각 (물리적으로 불가능한 이동)
+        self.max_jump_px = max_jump_px
 
         self._half = {eval_near: None, eval_far: None}
+        # 행별로 마지막에 채택된 중앙 x. 이상치 판정의 기준.
+        self._last_center = {eval_near: None, eval_far: None}
         self._last = LaneResult(0.0, 0.0, False, 0.0)
         self._miss = 0
+        self._rejected = 0                  # 이상치로 버린 횟수 (진단용)
 
     def reset(self):
         self._half = {self.eval_near: None, self.eval_far: None}
+        self._last_center = {self.eval_near: None, self.eval_far: None}
         self._last = LaneResult(0.0, 0.0, False, 0.0)
         self._miss = 0
+        self._rejected = 0
+
+    @property
+    def rejected_count(self):
+        """이상치로 버려진 fallback 추정 횟수. 로그/진단용."""
+        return self._rejected
 
     def _split_solid(self, solid_instances, f_dashed):
         """중앙선 곡선(없으면 화면 중심)을 기준으로 경계선을 좌/우로 가른다."""
@@ -135,20 +168,44 @@ class LaneEstimator:
             )
 
         if xd is not None and mid is not None:
-            return (xd + mid) / 2.0, 1.0
+            return self._accept(row, (xd + mid) / 2.0, 1.0)
         if xd is not None:
-            return xd, 0.9
+            return self._accept(row, xd, 0.9)
         if mid is not None:
-            return mid, 0.8
+            return self._accept(row, mid, 0.8)
 
+        # 한쪽 흰선만 보임. 학습된 반폭으로 중앙을 추정한다.
         half = self._half[row]
         if half is None:
+            # 반폭을 아직 한 번도 학습하지 못했다 (좌우 흰선을 동시에 본 적 없음).
+            # 근거 없이 추정하면 위험하므로 hold 로 넘긴다.
             return None, 0.0
         if xl is not None:
-            return xl + half, 0.4
+            return self._accept(row, xl + half, 0.4)
         if xr is not None:
-            return xr - half, 0.4
+            return self._accept(row, xr - half, 0.4)
         return None, 0.0
+
+    def _accept(self, row, center_x, quality):
+        """이상치를 걸러낸 뒤 채택한다. 기각되면 (None, 0.0) 을 돌려 hold 로 넘긴다.
+
+        모든 경로에 공통 적용한다. 극단값이 저신뢰 경로가 아니라 quality 0.9
+        (노란선만 보임) 에서 나오는 것이 실측으로 확인됐기 때문이다.
+        """
+        # ① 물리적 상한 — 트랙 중앙이 화면 중심에서 이만큼 벗어날 수는 없다.
+        #    다항식 외삽이 발산하면 수백~수천 px 이 나온다.
+        if abs(center_x - self.width / 2.0) > self.max_center_offset_px:
+            self._rejected += 1
+            return None, 0.0
+
+        # ② 급변 상한 — 직전 채택값에서 이만큼 튀는 것은 물리적으로 불가능하다.
+        prev = self._last_center[row]
+        if prev is not None and abs(center_x - prev) > self.max_jump_px:
+            self._rejected += 1
+            return None, 0.0
+
+        self._last_center[row] = center_x
+        return center_x, quality
 
     def update(self, dashed_instances, solid_instances):
         """프레임당 1회 호출.
