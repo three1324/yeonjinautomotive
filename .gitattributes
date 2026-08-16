@@ -1,0 +1,45 @@
+# ============================================================================
+#  줄바꿈 정규화
+#
+#  개발은 Windows, 실행은 젯슨(리눅스)이라 줄바꿈이 섞이기 쉽다.
+#  특히 쉘 스크립트가 CRLF 로 저장되면 리눅스에서
+#      bash: \r: command not found
+#  같은 알기 어려운 에러로 실패한다. 파이썬도 shebang 줄이 CRLF 면 깨진다.
+#
+#  그래서 저장소 안에서는 텍스트 파일을 **항상 LF** 로 통일한다.
+#  Windows 에디터 대부분은 LF 를 문제없이 다룬다.
+# ============================================================================
+
+# 기본: 텍스트로 판단되면 저장소에 LF 로 저장하고 체크아웃할 때도 LF 유지
+* text=auto eol=lf
+
+# 실행 환경이 리눅스인 것들은 명시적으로 LF 고정
+*.sh      text eol=lf
+*.bash    text eol=lf
+*.py      text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.xml     text eol=lf
+*.md      text eol=lf
+*.launch  text eol=lf
+*.rules   text eol=lf
+*.cmake   text eol=lf
+CMakeLists.txt text eol=lf
+
+# 바이너리 — 절대 변환하지 말 것 (변환되면 파일이 깨진다)
+*.pt      binary
+*.pth     binary
+*.onnx    binary
+*.engine  binary
+*.bin     binary
+*.pgm     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.mp4     binary
+*.pdf     binary
+*.zip     binary
+*.tgz     binary
+*.a       binary
+*.so      binary
+*.o       binary
