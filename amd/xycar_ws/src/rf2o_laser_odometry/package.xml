@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rf2o_laser_odometry</name>
+  <version>0.1.0</version>
+  <description>
+    Estimation of 2D odometry based on planar laser scans. Useful for mobile robots with innacurate base odometry.
+    For full description of the algorithm, please refer to:
+    Planar Odometry from a Radial Laser Scanner. A Range Flow-based Approach. ICRA 2016
+    Available at: http://mapir.isa.uma.es/mapirwebsite/index.php/mapir-downloads/papers/217
+
+    ── 이 프로젝트에서 수정한 부분 ──
+    원본은 package format 1 (ROS1 스타일: run_depend, cmake_modules) 이었다.
+    ROS2 에서는 다음 두 가지가 문제가 된다:
+      1) run_depend  -> format 1 전용 태그. format 3 에서는 exec_depend
+      2) cmake_modules -> ROS1 전용 패키지. ROS2 rosdep 이 해석하지 못해
+                          `rosdep install` 이 실패한다. eigen3_cmake_module 이
+                          이미 buildtool_depend 에 있으므로 제거해도 무방하다.
+    그래서 format 3 로 옮기고 cmake_modules 를 뺐다.
+    (재클론하면 다시 적용할 것)
+  </description>
+
+  <maintainer email="jgmonroy@uma.es">Javier G. Monroy</maintainer>
+  <author email="marianojt@uma.es">Mariano Jaimez</author>
+  <author email="jgmonroy@uma.es">Javier G. Monroy</author>
+  <license>GPL v3</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>eigen3_cmake_module</buildtool_depend>
+
+  <depend>geometry_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>eigen</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

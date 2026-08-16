@@ -1,0 +1,12 @@
+# rf2o_laser_odometry 파라미터
+# 휠 오도메트리가 없어서, 연속된 라이다 스캔끼리 비교해 이동량(odom)을 추정하는 용도.
+/**:
+  ros__parameters:
+    laser_scan_topic: /scan       # TODO(1): 실제 라이다 토픽 이름과 다르면 수정
+    odom_topic: /odom_rf2o
+    publish_tf: true
+    base_frame_id: base_link      # TODO(2): 실제 로봇 base frame 이름과 일치하는지 확인
+    odom_frame_id: odom
+    init_pose_from_topic: ""      # 빈 문자열 = 시작 위치를 (0,0,0)으로 고정 (합의된 방식)
+    freq: 20.0
+    verbose: false

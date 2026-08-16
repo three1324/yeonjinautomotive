@@ -1,0 +1,36 @@
+# slam_toolbox 매핑(mapping) 모드 파라미터
+# slam_toolbox 공식 mapper_params_online_async.yaml 에서 핵심 항목만 추린 것.
+# 참고: https://github.com/SteveMacenski/slam_toolbox
+slam_toolbox:
+  ros__parameters:
+    # -- 좌표계 --
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link          # TODO(2): 실제 base frame 이름과 일치하는지 확인
+    scan_topic: /scan               # TODO(1): 실제 라이다 토픽과 일치하는지 확인
+
+    mode: mapping                   # 지금 단계는 매핑 전용 (localization 모드 아님)
+
+    # -- 지도 --
+    resolution: 0.05
+    max_laser_range: 10.0           # TODO: 라이다 스펙(최대 유효 거리)에 맞게 수정
+    minimum_travel_distance: 0.2
+    minimum_travel_heading: 0.2
+    map_update_interval: 1.0
+    transform_publish_period: 0.02
+    transform_timeout: 0.2
+
+    # -- 스캔 매칭 --
+    use_scan_matching: true
+    use_scan_barycenter: true
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    minimum_time_interval: 0.5
+
+    # -- 솔버 (기본값, 우선 그대로 사용) --
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
