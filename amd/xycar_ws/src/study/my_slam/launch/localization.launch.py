@@ -36,7 +36,7 @@ def generate_launch_description():
                               description='base_link(뒷바퀴축)->laser x (m)'),
         DeclareLaunchArgument('laser_y', default_value='0.0'),
         DeclareLaunchArgument('laser_z', default_value='0.10',
-                              description='★아직 미실측'),
+                              description='지면->라이다 중심 높이 (m). 실측 10cm'),
         DeclareLaunchArgument('laser_frame', default_value='laser_frame'),
         DeclareLaunchArgument('start_x', default_value='0.0'),
         DeclareLaunchArgument('start_y', default_value='0.0'),

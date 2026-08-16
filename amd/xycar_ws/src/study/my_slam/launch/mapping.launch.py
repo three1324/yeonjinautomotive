@@ -11,7 +11,7 @@
        생성된 track_map.pgm / track_map.yaml 을 my_slam/maps/ 로 옮긴다
 
 인자:
-    laser_x/y/z  base_link 기준 라이다 장착 위치 (m)  ★ 실측 필수
+    laser_x/y/z  base_link 기준 라이다 장착 위치 (m). 2026-08-16 실측값이 기본값이다
     use_ekf      rf2o 대신 EKF 융합 오도메트리 사용 (2단계)
     rviz         RViz 를 함께 띄울지
 """
@@ -41,13 +41,13 @@ def generate_launch_description():
         #   base_link 는 뒷바퀴 축이므로  x = 0.333 + 0.085 = 0.418 m
         #   (기존 shortcut_slam 의 0.43 이 실측값에 가까웠던 것으로 확인됨)
         # y: 차량 중앙에 장착되어 0.
-        # z: 지면에서 라이다 중심까지 높이 — 아직 미측정, 재서 갱신할 것.
+        # z: 지면에서 라이다 중심까지 10cm (실측).
         DeclareLaunchArgument('laser_x', default_value='0.418',
                               description='base_link(뒷바퀴축)->laser x (m)'),
         DeclareLaunchArgument('laser_y', default_value='0.0',
                               description='차량 중앙 장착이므로 0'),
         DeclareLaunchArgument('laser_z', default_value='0.10',
-                              description='base_link->laser z (m) ★아직 미실측'),
+                              description='지면->라이다 중심 높이 (m). 2026-08-16 실측 10cm'),
         DeclareLaunchArgument('laser_frame', default_value='laser_frame'),
         DeclareLaunchArgument('use_ekf', default_value='false'),
         DeclareLaunchArgument('rviz', default_value='true'),
