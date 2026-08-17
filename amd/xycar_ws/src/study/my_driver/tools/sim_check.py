@@ -140,18 +140,34 @@ def run(a, offset0, curvature, duration, lane_lost=(), car_at=None, label=""):
     peak = max(abs(h[1] - h[4]) for h in hist)
     sat_pct = saturated / n * 100.0
 
-    diverged = abs(final) > 300.0 or ripple > 150.0
-    mark = "발산" if diverged else ("포화" if sat_pct > 20.0 else "OK")
+    # 두 실패 모드는 **처방이 반대**라 절대 섞으면 안 된다.
+    #   정상상태 오차 : 중앙에서 벗어난 채 안정 (진동 없음) -> k_curve 를 **올린다**
+    #   진동         : 중앙 근처를 계속 넘나든다            -> k_lat 을 내리거나 k_damp 를 올린다
+    # 하나로 묶어 "발산"이라 부르면 k_curve 부족을 k_lat 문제로 오진한다.
+    biased = abs(final) > 300.0
+    oscillating = ripple > 150.0
+
+    if oscillating:
+        mark = "진동"
+    elif biased:
+        mark = "정상상태오차"
+    elif sat_pct > 20.0:
+        mark = "포화"
+    else:
+        mark = "OK"
 
     print(f"  {label:22} 최종오차 {final:+7.1f}px  진동폭 {ripple:6.1f}px  "
           f"최대 {peak:6.1f}px  조향포화 {sat_pct:4.1f}%   {mark}")
-    return diverged
+    return biased, oscillating
 
 
 def main():
     ap = argparse.ArgumentParser()
+    # 기본값은 **drive_params.yaml 의 steer 값과 일치시킬 것.**
+    # 다르면 아무도 쓰지 않는 게인을 검증하게 된다 (실제로 k_curve 가
+    # 0.06 으로 어긋나 있어서 곡선 발산이 잘못 보고됐다).
     ap.add_argument('--k-lat', type=float, default=0.10)
-    ap.add_argument('--k-curve', type=float, default=0.06)
+    ap.add_argument('--k-curve', type=float, default=0.15)
     ap.add_argument('--k-damp', type=float, default=0.004)
     a = ap.parse_args()
 
@@ -159,25 +175,35 @@ def main():
     print(f"모델  K_STEER={K_STEER}  추종가능 최대곡률={MAX_TRACKABLE_CURVATURE:.0f}"
           f"  (임의값 - 절대 튜닝 근거 아님)\n")
 
-    bad = 0
+    n_bias = n_osc = 0
+
+    def tally(r):
+        nonlocal n_bias, n_osc
+        b, o = r
+        n_bias += 1 if b else 0
+        n_osc += 1 if o else 0
 
     print("[직선 복귀] 초기 오프셋에서 트랙 중앙으로 돌아오는가")
     for off0 in (50, 150, 300):
-        bad += run(a, off0, 0.0, 12.0, label=f"초기 {off0:+}px")
+        tally(run(a, off0, 0.0, 12.0, label=f"초기 {off0:+}px"))
 
     print("\n[곡선 추종] 일정 곡률에서 정상상태 오차가 남는가")
     for curv in (40, 80, 120):
-        bad += run(a, 0.0, curv, 12.0, label=f"곡률 {curv}")
+        tally(run(a, 0.0, curv, 12.0, label=f"곡률 {curv}"))
 
     print("\n[차선 결측] 2~3.5초 구간에서 차선을 놓쳤을 때")
-    bad += run(a, 100.0, 0.0, 12.0, lane_lost=((2.0, 3.5),), label="결측 1.5s")
+    tally(run(a, 100.0, 0.0, 12.0, lane_lost=((2.0, 3.5),), label="결측 1.5s"))
 
     print("\n[추월] 2~4초 구간에 앞차 등장 (왼쪽 -> 오른쪽으로 회피)")
-    bad += run(a, 0.0, 0.0, 12.0, car_at=(2.0, 4.0), label="앞차 회피")
+    tally(run(a, 0.0, 0.0, 12.0, car_at=(2.0, 4.0), label="앞차 회피"))
 
     print()
-    if bad:
-        print(f"{bad}개 시나리오 발산 - k_lat 을 줄이거나 k_damp 를 키울 것")
+    if n_osc:
+        print(f"진동 {n_osc}개 - k_lat 을 줄이거나 k_damp 를 키울 것")
+    if n_bias:
+        print(f"정상상태오차 {n_bias}개 - **k_curve 를 올릴 것** "
+              f"(k_lat 을 건드리면 안 된다. 이론값은 1/K_STEER = {1.0/K_STEER:.3f})")
+    if n_osc or n_bias:
         return 1
     print("모든 시나리오 안정. (실제 게인 값은 실차에서 확정할 것)")
     return 0
