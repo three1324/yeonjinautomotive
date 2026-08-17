@@ -393,6 +393,34 @@ python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.30
 **젯슨에서 주의**: `ultralytics`/`torch`는 PyPI x86 휠이 아니라 **NVIDIA Jetson용 휠**을
 써야 한다. 추론 속도가 부족하면 `best5.pt`를 **TensorRT로 export**할 것.
 
+### 센서 udev 규칙 — 젯슨 보드마다 별도로 설정해야 함
+
+**이건 git으로 안 옮겨진다.** `/etc/udev/rules.d/`는 리눅스 시스템 설정이라 저장소 밖이다.
+코드(`vesc.yaml`의 `port: /dev/ttyMOTOR` 등)는 `git pull`로 그대로 받아지지만, 그 경로가
+실제로 존재하려면 **이 젯슨 본체에 udev 규칙이 있어야 한다.** 새 젯슨으로 옮기거나
+재설치(reflash)하면 아래를 다시 실행해야 한다. (반대로 코드는 안 고쳐도 된다 —
+규칙이 `idVendor`/`idProduct`로 장치 종류를 식별하지, 이 보드 개체를 식별하지 않는다)
+
+```bash
+# VESC (ChibiOS 펌웨어, 0483:5740) -> /dev/ttyMOTOR
+echo 'KERNEL=="ttyACM*", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", MODE:="0666", GROUP:="dialout", SYMLINK+="ttyMOTOR"' | sudo tee /etc/udev/rules.d/99-vesc.rules
+
+# YDLidar (CP2102, 10c4:ea60) -> /dev/ttyLIDAR
+# serial 값은 라이다 개체마다 다를 수 있다. udevadm info -q property -n /dev/ttyUSB0 로 확인 후 맞출 것.
+echo 'KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="0001", MODE:="0666", GROUP:="dialout", SYMLINK+="ttyLIDAR"' | sudo tee /etc/udev/rules.d/99-ydlidar.rules
+
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+적용 확인: `ls -l /dev/ttyMOTOR /dev/ttyLIDAR`
+
+새 장치의 vendor:product ID를 모를 때:
+```bash
+lsusb                                              # 어떤 칩들이 꽂혀있는지
+udevadm info -q property -n /dev/ttyACM0 | grep -E "ID_VENDOR_ID|ID_MODEL_ID|ID_MODEL="
+```
+
 ---
 
 ## 7. 실차 캘리브레이션 (미완료)
