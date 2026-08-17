@@ -7,9 +7,12 @@
 발행:
     /obstacle  Float32MultiArray [front_dist, left_free, right_free]
                단위 m. 비어 있으면 range_max 값이 들어간다.
+    /corridor  Float32MultiArray [offset_near, offset_far, valid, quality]
+               라바콘이 이루는 복도의 중앙. **단위는 픽셀** — /lane 과 같은
+               형식이라 driver 가 두 기준을 그대로 섞을 수 있다.
 
-판단(정지할지 말지)은 여기서 하지 않는다. my_driver 의 몫이다.
-여기는 관측만 낸다 — 층별 책임 분리 원칙.
+판단(정지할지 말지, 차선 대신 복도를 따를지)은 여기서 하지 않는다.
+my_driver 의 몫이다. 여기는 관측만 낸다 — 층별 책임 분리 원칙.
 """
 
 import rclpy
@@ -18,6 +21,7 @@ from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float32MultiArray
 
+from my_obstacle.corridor import CorridorEstimator
 from my_obstacle.sectors import sector_min
 
 
@@ -42,6 +46,23 @@ class ObstacleNode(Node):
                 ("range_max", 10.0),
                 ("min_points", 3),
                 ("log_period_sec", 2.0),
+                # --- 라바콘 복도 추정 ---
+                ("corridor.enabled", True),
+                ("corridor.x_min", 0.25),
+                ("corridor.x_max", 2.2),
+                ("corridor.max_lateral", 1.5),
+                ("corridor.min_lateral", 0.06),
+                ("corridor.bin_size", 0.15),
+                ("corridor.min_bins", 4),
+                ("corridor.min_span_m", 0.5),
+                ("corridor.min_points_per_side", 1),
+                ("corridor.eval_near_m", 0.6),
+                ("corridor.eval_far_m", 1.5),
+                ("corridor.px_per_meter", 300.0),
+                ("corridor.nominal_half_width_m", 0.35),
+                ("corridor.min_both_bins", 3),
+                ("corridor.hold_frames", 10),
+                ("corridor.max_jump_px", 250.0),
             ],
         )
 
@@ -66,12 +87,34 @@ class ObstacleNode(Node):
         )
 
         self.pub = self.create_publisher(Float32MultiArray, "obstacle", reliable_qos)
+        self.pub_corridor = self.create_publisher(
+            Float32MultiArray, "corridor", reliable_qos)
         self.create_subscription(
             LaserScan, g("scan_topic").value, self.on_scan, sensor_qos
         )
 
+        self.corridor_enabled = g("corridor.enabled").value
+        self.corridor = CorridorEstimator(
+            x_min=g("corridor.x_min").value,
+            x_max=g("corridor.x_max").value,
+            max_lateral=g("corridor.max_lateral").value,
+            min_lateral=g("corridor.min_lateral").value,
+            bin_size=g("corridor.bin_size").value,
+            min_bins=g("corridor.min_bins").value,
+            min_span_m=g("corridor.min_span_m").value,
+            min_points_per_side=g("corridor.min_points_per_side").value,
+            eval_near_m=g("corridor.eval_near_m").value,
+            eval_far_m=g("corridor.eval_far_m").value,
+            px_per_meter=g("corridor.px_per_meter").value,
+            nominal_half_width_m=g("corridor.nominal_half_width_m").value,
+            min_both_bins=g("corridor.min_both_bins").value,
+            hold_frames=g("corridor.hold_frames").value,
+            max_jump_px=g("corridor.max_jump_px").value,
+        )
+
         self._last_log = self.get_clock().now()
-        self.get_logger().info("obstacle_node 시작")
+        self.get_logger().info(
+            f"obstacle_node 시작 (복도추정 {'on' if self.corridor_enabled else 'off'})")
 
     def on_scan(self, msg):
         def sec(lo_hi):
@@ -89,11 +132,28 @@ class ObstacleNode(Node):
 
         self.pub.publish(Float32MultiArray(data=[float(front), float(left), float(right)]))
 
+        cor = None
+        if self.corridor_enabled:
+            cor = self.corridor.update(
+                msg.ranges, msg.angle_min, msg.angle_increment,
+                max(self.range_min, msg.range_min),
+                min(self.range_max, msg.range_max),
+            )
+            self.pub_corridor.publish(Float32MultiArray(data=[
+                float(cor.offset_near),
+                float(cor.offset_far),
+                1.0 if cor.valid else 0.0,
+                float(cor.quality),
+            ]))
+
         now = self.get_clock().now()
         if (now - self._last_log).nanoseconds / 1e9 >= self._log_period:
-            self.get_logger().info(
-                f"front={front:5.2f}m  left={left:5.2f}m  right={right:5.2f}m"
-            )
+            line = f"front={front:5.2f}m  left={left:5.2f}m  right={right:5.2f}m"
+            if cor is not None:
+                line += (f" | 복도 {'OK ' if cor.valid else 'HOLD'}"
+                         f" off={cor.offset_near:+6.0f}/{cor.offset_far:+6.0f}px"
+                         f" q{cor.quality:.2f} 폭{cor.width_m:.2f}m 구간{cor.n_bins}")
+            self.get_logger().info(line)
             self._last_log = now
 
 
