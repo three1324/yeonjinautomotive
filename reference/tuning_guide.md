@@ -19,13 +19,16 @@
 | 실측 완료 | 라이다 x = 0.418 m, y = 0.0 | ✅ 반영됨 |
 | 실측 완료 | image_width = 640 | ✅ 반영됨 |
 | **미실측** | 라이다 z (높이) | ⬜ 줄자로 잴 것 |
-| **미실측** | 트랙 폭 (흰선 사이, m) | ⬜ 라이다 복도 기능에 필요 |
-| **미실측** | 콘 복도 폭 (m) | ⬜ |
+| **미실측** | 트랙 폭 (흰선 사이, m) | ⬜ **`px_per_meter` 전제조건** — 4-1 참고 |
+| **미실측** | 콘 복도 폭 (m) | ⬜ `corridor.nominal_half_width_m` 확정용 |
 | 검증 완료 | 인지 알고리즘 (영상) | ✅ 유효율 100% |
 | 검증 완료 | 제어 구조 (시뮬) | ✅ 전 시나리오 안정 |
+| 검증 완료 | 복도 추정 (합성) | ✅ 14/14, 오차 ≤5px |
+| 검증 완료 | 차선↔복도 융합 (합성) | ✅ 6/6, 전환 점프 6px |
 | **미확정** | 조향 게인 3종 | ⬜ 실차에서만 가능 |
 | **미확정** | center_bias_px | ⬜ 실차 정지 상태에서 측정 |
-| **미착수** | 콘 복도 주행 (라이다) | ⬜ 설계만 논의됨 |
+| **미확정** | `corridor.px_per_meter` | ⬜ **300.0 은 placeholder** |
+| **미검증** | 콘 복도 주행 (실측 라이다) | ⬜ rosbag 녹화 필요 |
 
 ---
 
@@ -220,7 +223,7 @@ speed 27  ->  약 2.16 m/s   (VESC ERPM 상한 10000/4614 = 2.17 m/s)
 
 ## 4. 미해결 설계 과제
 
-### 4-1. ★ 라바콘 복도 주행 — 가장 시급
+### 4-1. ★ 라바콘 복도 주행 — 골격 구현 완료, 실측 튜닝 대기
 
 **문제**: 라바콘이 좌우로 촘촘히 늘어서 **복도(벽)** 를 이루고, 그 복도가 S자로 굽어 있다.
 우측 콘 벽이 흰 실선보다 **안쪽**에 있어서, 페인트 차선 중심을 따라가면
@@ -230,9 +233,19 @@ speed 27  ->  약 2.16 m/s   (VESC ERPM 상한 10000/4614 = 2.17 m/s)
 > 안 가린다"* 라고 적어뒀는데 **이 판단은 틀렸다.** 사진 판독 오류였다.
 > 콘 벽이 실제 주행 가능 경계이므로 별도 처리가 필요하다.
 
-**설계 방향** (논의 완료, 미구현)
+**구현 상태** (2026-08-17)
 
-차선 추정과 **완전히 같은 구조**로 만든다:
+| 항목 | 파일 | 상태 |
+|---|---|---|
+| 복도 중심선 추정 | `my_obstacle/corridor.py` | ✅ 합성 데이터 14/14 (오차 ≤5px) |
+| 차선↔복도 융합 | `my_driver/fusion.py` | ✅ 전환 시나리오 6/6 |
+| ROS 연동 | `obstacle_node` `/corridor` → `driver_node` | ✅ 배선 완료 |
+| **실측 라이다 검증** | — | ⬜ **rosbag 필요** |
+| **`px_per_meter` 확정** | — | ⬜ **트랙폭 실측 필요** |
+
+**설계 (구현된 구조)**
+
+차선 추정과 **완전히 같은 구조**다:
 
 ```
 차선:  YOLO 마스크 → 픽셀 좌표 → polyfit x=f(y) → 두 행 평가   → offset_near, offset_far
@@ -256,17 +269,53 @@ px_per_meter = (학습된 픽셀 반폭 × 2) / 실측 트랙폭(m)
 ```
 → 별도 호모그래피 캘리브레이션 불필요.
 
-**전환 정책**
+**전환 정책 — 스위치가 아니라 가중치 (`fusion.py`)**
+
+"콘 보이면 복도, 아니면 차선"으로 딱 끊으면 전환 순간 목표가 **수십~수백 px 점프**
+하고 그게 그대로 조향에 실린다. 그래서 가중치를 시간에 걸쳐 옮긴다.
+
 ```
-콘 충분히 보임 (cone_n ≥ N)  ->  복도 기준 (라이다)
-콘 없음                       ->  차선 기준 (카메라)
-둘 다                         ->  quality 가중 혼합
+목표 가중치 = f(콘 개수) × (복도 quality / 양측 quality 합) × 2
+             ↑ cone_n_lo~hi 사이에서 0→max_corridor_weight
+현재 가중치 = 목표로 초당 weight_rate_per_sec 만큼만 이동
 ```
 
-**검증**: 라이다 실측 데이터 필요. 젯슨에서 콘 구간 rosbag 녹화 후 오프라인 튜닝.
-```bash
-ros2 bag record /scan /image_raw -o cone_section
+실측 확인 (`fusion_sim.py`):
+
+| `weight_rate_per_sec` | 전환 시 프레임간 최대 변화 |
+|---|---|
+| 0.5 | 2 px |
+| **1.5 (기본)** | **6 px** |
+| 5.0 | 20 px |
+| 30.0 | 108 px ← 조향이 튄다 |
+
+**튜닝 순서**
+
+| 증상 | 고칠 파라미터 | 방향 |
+|---|---|---|
+| 콘 구간 진입 시 차가 휘청 | `fusion.weight_rate_per_sec` | 낮춘다 (1.5→0.8) |
+| 콘 구간 진입이 늦어 콘을 스침 | `fusion.cone_n_hi` | 낮춘다 (6→4) |
+| 콘 없는데 복도로 새어감 | `fusion.cone_n_lo` | 올린다 (2→3) |
+| 복도가 흔들리는데 따라감 | `fusion.min_corridor_quality` | 올린다 (0.4→0.6) |
+| 콘 구간에서 여전히 콘 스침 | `fusion.max_corridor_weight` | 올린다 (0.9→1.0) |
+| 복도 offset 이 실제와 배율이 안 맞음 | `corridor.px_per_meter` | **아래 계산식** |
+| 먼 콘 때문에 곡선에서 오차 | `corridor.x_max` | 낮춘다 (2.2→1.8) |
+| 구간 수 부족(`구간N` 로그) | `corridor.bin_size` | 낮춘다 (0.15→0.12) |
+
+**`px_per_meter` — 현재 300.0 은 placeholder다. 반드시 실측으로 대체**
 ```
+px_per_meter = (LaneEstimator 가 학습한 픽셀 반폭 × 2) / 실측 트랙폭(m)
+```
+이 값이 틀리면 복도 offset 이 통째로 배율만큼 틀리고, 조향 게인이 그만큼
+어긋난다. 트랙폭 실측이 **콘 구간 주행의 전제 조건**이다.
+
+**남은 검증**: 합성 데이터만 통과했다. 실측 라이다로 확인해야 한다.
+```bash
+ros2 bag record /scan /image_raw -o cone_section     # 젯슨, 콘 구간 통과하며
+python3 tools/corridor_sim.py --bag cone_section     # (bag 입력은 아직 미구현)
+```
+현재 `corridor_sim.py` 는 합성 콘 배치만 만든다. rosbag 이 생기면 그때 입력
+경로를 붙인다. 그 전까지 `corridor.*` 실측값은 전부 추정치다.
 
 **참고 코드**: `f1tenth_ws.zip`의 `follow_the_gap` 패키지 (라이다 빈틈 탐색)
 
@@ -290,6 +339,8 @@ ros2 bag record /scan /image_raw -o cone_section
 |---|---|---|
 | `my_perception/tools/offline_check.py` | 영상으로 인지 검증·시각화 | ❌ |
 | `my_driver/tools/sim_check.py` | 제어 폐루프 시뮬레이션 | ❌ |
+| `my_driver/tools/fusion_sim.py` | 차선↔복도 전환 점프 검증 | ❌ |
+| `my_obstacle/tools/corridor_sim.py` | 합성 콘 배치로 복도 추정 검증 | ❌ |
 | `my_bringup/tools/check_params.py` | yaml ↔ 노드 파라미터 이름 대조 | ❌ |
 | `xycar_motor/scripts/check_vesc_port.sh` | VESC 시리얼 포트 점검 | ❌ |
 
@@ -301,6 +352,10 @@ python3 tools/offline_check.py 영상.mp4 --every 15 --viz out/
 # 제어 (게인 바꿔가며)
 cd amd/xycar_ws/src/study/my_driver
 python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.25
+
+# 콘 복도 (fusion.py / corridor.py 고친 뒤 반드시)
+python3 tools/fusion_sim.py                     # my_driver 에서
+python3 tools/corridor_sim.py                   # my_obstacle 에서
 
 # 파라미터 정합성 (yaml 고친 뒤 반드시)
 cd amd/xycar_ws/src/study/my_bringup
@@ -321,3 +376,8 @@ python3 tools/check_params.py
 | 2026-08-16 | `wheelbase` 0.26 → **0.333** | 줄자 실측 33.3 cm |
 | 2026-08-16 | 라이다 `x` 0.20 → **0.418** | 축거 33.3 + 앞바퀴축 앞 8.5 cm |
 | 2026-08-17 | 라바콘 구간 설계 재검토 필요 판명 | 콘이 복도(벽) 형태, 흰선 안쪽 |
+| 2026-08-17 | 차선 추정에 이상치 방어 추가 | q0.9 경로에서 746px 극단값 관측 |
+| 2026-08-17 | `corridor.x_max` 3.0 → **2.2** | 곡선 far 오차 −31px → +3px |
+| 2026-08-17 | `corridor.bin_size` 0.25 → **0.15** | 구간 4개뿐이라 피팅 불안정 |
+| 2026-08-17 | 융합 전환을 스위치 → **가중치 램프** | 차선 소실 시 120px → 17px 점프 |
+| 2026-08-17 | `/corridor` 신선도 검사 추가 | obstacle_node 사망 시 낡은 복도 추종 |
