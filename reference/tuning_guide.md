@@ -358,13 +358,48 @@ px_per_meter = (LaneEstimator 가 학습한 픽셀 반폭 × 2) / 실측 트랙�
 이 값이 틀리면 복도 offset 이 통째로 배율만큼 틀리고, 조향 게인이 그만큼
 어긋난다. 트랙폭 실측이 **콘 구간 주행의 전제 조건**이다.
 
-**남은 검증**: 합성 데이터만 통과했다. 실측 라이다로 확인해야 한다.
+**실측 검증 절차 — 준비 완료. 데이터만 있으면 바로 돌아간다.**
+
+① 젯슨에서 녹화 (콘 구간을 **천천히 통과하면서**)
 ```bash
-ros2 bag record /scan /image_raw -o cone_section     # 젯슨, 콘 구간 통과하며
-python3 tools/corridor_sim.py --bag cone_section     # (bag 입력은 아직 미구현)
+ros2 bag record /scan /image_raw -o cone_section
 ```
-현재 `corridor_sim.py` 는 합성 콘 배치만 만든다. rosbag 이 생기면 그때 입력
-경로를 붙인다. 그 전까지 `corridor.*` 실측값은 전부 추정치다.
+> ⚠️ `--storage mcap` 을 쓰지 말 것. 리더가 sqlite3(.db3) 만 읽는다.
+> Humble 기본값이 db3 라 그냥 위 명령이면 된다.
+
+② 개발 PC 로 폴더째 복사한 뒤 (ROS 설치 불필요)
+```bash
+cd amd/xycar_ws/src/study/my_obstacle
+python3 tools/corridor_sim.py --bag cone_section
+python3 tools/corridor_sim.py --bag cone_section --plot     # 시계열 그래프
+```
+
+③ 출력에서 바로 반영할 값이 나온다
+```
+복도 폭        중앙 0.90m   5~95% 0.90 ~ 0.91m
+반영할 값
+  corridor.nominal_half_width_m: 0.450
+  corridor.max_jump_px: 60 이상
+```
+
+**폭(m)과 유효율은 `px_per_meter` 와 무관하므로 지금 바로 믿어도 된다.**
+offset(px) 값만 `px_per_meter` 확정 후에 의미가 생긴다.
+
+파라미터를 바꿔가며 같은 bag 으로 비교할 수 있다:
+```bash
+python3 tools/corridor_sim.py --bag cone_section --x-max 1.8 --bin-size 0.12
+```
+
+| 출력 증상 | 조치 |
+|---|---|
+| 유효율이 낮다 (< 80%) | `--x-max` 를 키우거나 `min_bins` 를 낮춘다 |
+| 복도를 한 번도 못 찾음 | 콘이 `max_lateral` 밖인지, 콘 구간을 녹화했는지 확인 |
+| 구간 수가 4 미만 | `--bin-size` 를 낮춘다 |
+| 프레임간 변화가 크다 (>30px) | `x_max` 를 낮춘다 (먼 콘이 피팅을 흔든다) |
+
+**리더 자체 검증**: `python3 tools/test_rosbag_reader.py` (28/28). 실측 데이터로
+내리는 결론이 리더 버그 때문에 틀리는 일이 없도록 CDR 왕복·엔디안·정렬
+경계·sqlite 스키마를 먼저 확인해 둔 것이다.
 
 **참고 코드**: `f1tenth_ws.zip`의 `follow_the_gap` 패키지 (라이다 빈틈 탐색)
 
@@ -390,7 +425,9 @@ python3 tools/corridor_sim.py --bag cone_section     # (bag 입력은 아직 미
 | `my_driver/tools/sim_check.py` | 제어 폐루프 시뮬레이션 | ❌ |
 | `my_driver/tools/fusion_sim.py` | 차선↔복도 전환 점프 검증 | ❌ |
 | `my_driver/tools/start_sim.py` | 출발 지연·조기출발 몬테카를로 | ❌ |
-| `my_obstacle/tools/corridor_sim.py` | 합성 콘 배치로 복도 추정 검증 | ❌ |
+| `my_obstacle/tools/corridor_sim.py` | 복도 추정 검증 (합성 + `--bag` 실측) | ❌ |
+| `my_obstacle/tools/rosbag_reader.py` | ROS 없이 rosbag(.db3) 읽기 | ❌ |
+| `my_obstacle/tools/test_rosbag_reader.py` | 위 리더 자체 검증 (28/28) | ❌ |
 | `my_bringup/tools/check_params.py` | yaml ↔ 노드 파라미터 이름 대조 | ❌ |
 | `xycar_motor/scripts/check_vesc_port.sh` | VESC 시리얼 포트 점검 | ❌ |
 
@@ -434,3 +471,4 @@ python3 tools/check_params.py
 | 2026-08-17 | `light.min_ratio` 0.5 → **0.6** | 적대적 조기출발 48회 → 1회 (5000회) |
 | 2026-08-17 | `sim_check` 기본 k_curve 0.06 → **0.15** | yaml 과 불일치, 곡선 발산 오보고 |
 | 2026-08-17 | sim_check 판정을 진동/정상상태오차로 분리 | 처방이 반대라 오진 유발 |
+| 2026-08-17 | rosbag 리더 + `--bag` 모드 추가 | 개발 PC 에 ROS 없이 실측 튜닝 |

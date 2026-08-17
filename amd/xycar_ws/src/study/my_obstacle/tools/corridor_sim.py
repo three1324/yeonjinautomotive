@@ -114,10 +114,124 @@ def run_case(name, center_fn, half_width=0.35, **kw):
     return ok, pts, res, est
 
 
+def run_bag(path, topic, stride, limit, plot, **est_kw):
+    """실측 rosbag 으로 복도 추정을 돌린다.
+
+    합성과 달리 **정답이 없다.** 대신 실측으로만 알 수 있는 것을 뽑는다:
+
+        width_m      -> corridor.nominal_half_width_m 을 확정하는 근거.
+                        px_per_meter 와 무관하게 미터로 나오므로 신뢰할 수 있다.
+        valid 비율    -> 콘 구간에서 복도를 얼마나 자주 찾는가
+        n_bins       -> bin_size / x_max 가 적절한가
+        프레임간 변화 -> 이 값이 크면 조향이 튄다 (max_jump_px 근거)
+    """
+    import statistics
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from rosbag_reader import find_db3, list_topics, read_scans
+
+    db3 = find_db3(path)
+    print(f"bag: {db3}")
+    for name, typ, cnt in list_topics(db3):
+        mark = " <-" if name == topic else ""
+        print(f"  {name:<28}{typ:<34}{cnt:>7}개{mark}")
+    print()
+
+    est = CorridorEstimator(**est_kw)
+    widths, bins_n, quals, offs = [], [], [], []
+    n_all = n_valid = 0
+    jumps = []
+    prev = None
+
+    for m in read_scans(db3, topic, limit=limit, stride=stride):
+        r = est.update(m.ranges, m.angle_min, m.angle_increment,
+                       max(0.05, m.range_min), m.range_max)
+        n_all += 1
+        if r.valid:
+            n_valid += 1
+            widths.append(r.width_m)
+            bins_n.append(r.n_bins)
+            quals.append(r.quality)
+            offs.append(r.offset_near)
+            if prev is not None:
+                jumps.append(abs(r.offset_near - prev))
+            prev = r.offset_near
+        else:
+            prev = None
+
+    if n_all == 0:
+        print("스캔이 하나도 없다. --topic 을 확인할 것.")
+        return False
+
+    print(f"스캔 {n_all}개 중 복도 유효 {n_valid}개 ({100.0*n_valid/n_all:.1f}%)")
+    if not widths:
+        print("\n복도를 한 번도 못 찾았다. 확인할 것:")
+        print("  - 이 bag 구간에 실제로 콘이 있나 (콘 구간을 녹화했나)")
+        print("  - corridor.x_max / max_lateral 안에 콘이 들어오나")
+        print("  - corridor.min_bins / min_span_m 이 너무 빡빡하지 않나")
+        return False
+
+    def stat(name, xs, unit=""):
+        xs = sorted(xs)
+        p5 = xs[int(0.05 * (len(xs) - 1))]
+        p95 = xs[int(0.95 * (len(xs) - 1))]
+        med = statistics.median(xs)
+        print(f"  {name:<16}중앙 {med:>7.2f}{unit}   "
+              f"5~95% {p5:>6.2f} ~ {p95:>6.2f}{unit}")
+
+    print()
+    stat("복도 폭", widths, "m")
+    stat("구간 수", bins_n)
+    stat("quality", quals)
+    stat("offset_near", offs, "px")
+    if jumps:
+        stat("프레임간 변화", jumps, "px")
+
+    half = statistics.median(widths) / 2.0
+    print()
+    print("반영할 값")
+    print(f"  corridor.nominal_half_width_m: {half:.3f}"
+          f"   (실측 복도폭 중앙값 {statistics.median(widths):.3f}m 의 절반)")
+    if jumps:
+        j95 = sorted(jumps)[int(0.95 * (len(jumps) - 1))]
+        print(f"  corridor.max_jump_px: {max(60.0, j95 * 2):.0f} 이상"
+              f"   (실측 프레임간 변화 95% = {j95:.0f}px)")
+    print()
+    print("⚠️ offset(px) 값은 px_per_meter 가 확정돼야 의미가 있다.")
+    print("   폭(m) 과 유효율은 px_per_meter 와 무관하므로 지금 믿어도 된다.")
+
+    if plot:
+        import matplotlib.pyplot as plt
+        fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+        axes[0][0].plot(offs); axes[0][0].set_title("offset_near (px)")
+        axes[0][0].axhline(0, color="gray", lw=0.5)
+        axes[0][1].plot(widths); axes[0][1].set_title("복도 폭 (m)")
+        axes[1][0].plot(bins_n); axes[1][0].set_title("구간 수")
+        axes[1][1].hist(jumps or [0], bins=30); axes[1][1].set_title("프레임간 변화 (px)")
+        plt.tight_layout(); plt.show()
+
+    return n_valid > 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plot", action="store_true")
+    ap.add_argument("--bag", help="ros2 bag 디렉터리 또는 .db3 경로. "
+                                  "주면 합성 대신 실측으로 검증한다")
+    ap.add_argument("--topic", default="/scan")
+    ap.add_argument("--stride", type=int, default=1, help="N개마다 1개만 처리")
+    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--px-per-meter", type=float, default=PX_PER_M)
+    ap.add_argument("--x-max", type=float, default=2.2)
+    ap.add_argument("--bin-size", type=float, default=0.15)
+    ap.add_argument("--half-width", type=float, default=0.35)
     a = ap.parse_args()
+
+    if a.bag:
+        ok = run_bag(a.bag, a.topic, a.stride, a.limit, a.plot,
+                     px_per_meter=a.px_per_meter, x_max=a.x_max,
+                     bin_size=a.bin_size, nominal_half_width_m=a.half_width)
+        return 0 if ok else 1
 
     print(f"px_per_meter = {PX_PER_M}  (임시값 — 실차에서 재계산 필요)")
     print(f"평가 지점: near {0.6}m, far {1.5}m\n")
