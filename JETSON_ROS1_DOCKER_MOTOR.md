@@ -675,11 +675,11 @@ ROS2 `xycar_motor` 를 구독 → `docker exec ... rostopic pub` 으로 전달.
 | 날짜 | 단계 | 결과 | 비고 |
 |---|---|---|---|
 | 2026-08-18 | **Step 0 원본 이미지 확보** | ✅ **완료** | 베이스=desktop-full · 커스텀=serial/ackermann_msgs/pyserial3.5/bashrc alias · motor는 alias (§6 Step 1 참고) |
-| | Step 1 이미지 빌드 | | |
-| | Step 2 catkin_make | | |
-| | Step 3 ros1_bridge | | |
-| | Step 4 스크립트 수정 | | |
-| | Step 5 통합 실행 | | |
-| | 검증 #3 VESC 전압 | | 실제 전압: ___ V |
-| | 검증 #5 토픽 이름 | | 택한 방식: ___ |
-| | ROS_DOMAIN_ID | | 확정값: ___ |
+| 2026-08-18 | Step 1 이미지 빌드 | ✅ **완료** | 패키지 236개(원본과 일치) · motor alias 확인(`bash -ic "type -a motor"` — `-lc`가 아니라 `-ic` 여야 함, `.bashrc`가 non-interactive에서 조기 return). **추가 수정**: `/root` 기본권한 700이라 `--user` 비-root 진입 시 traverse 불가 → Dockerfile에 `chmod o+x /root` 추가(모터/VESC 로직과 무관, 순수 빌드 권한 조정) |
+| 2026-08-18 | Step 2 catkin_make | ✅ **완료** | `--user "$(id -u):$(id -g)"` 사용, `docker run -it` 대신 `-i`만 사용(비TTY 세션이라 `-t` 제거). 빌드 산출물 전부 `e-on` 소유 확인. `vesc_msgs`/`vesc_driver`/`vesc_ackermann`/`xycar_motor` 정상 빌드(경고만, 에러 없음) |
+| 2026-08-18 | Step 3 ros1_bridge | ✅ **완료** | TommyChangUMD/ros-humble-ros1-bridge-builder 사용. 빌드 시간 약 23분(ros1_bridge 패키지 컴파일 자체는), 전체 이미지 빌드 포함 수 분대(스왑 추가 불필요, 기존 zram 7.6GB로 충분). `~/ros-humble-ros1-bridge/install/ros1_bridge/lib/libros1_bridge.so` 94MB, `ELF 64-bit ARM aarch64` 확인. 소유권 전부 e-on |
+| 2026-08-18 | Step 4 스크립트 수정 | ✅ **완료** | `HOST_WS_PATH`/`Downloads` 마운트를 `$HOME` 기반으로 변경(지시서 권장대로). `ros-humble-ros1-bridge` 소스 경로는 원래 `~` 기반이라 미변경 |
+| 2026-08-18 | Step 5 통합 실행 | ✅ **완료** | `/dev/ttyMOTOR -> ttyACM0` 연결 확인 후 `~/xycar_ws/etc/motor_vesc/motor` 로 컨테이너+브릿지 기동, 조향·구동 테스트까지 모터 구동 확인 완료 |
+| 2026-08-18 | 검증 #3 VESC 전압 | ✅ 정상 확인 | 배터리 정상 연결 상태로 확인됨(구체 수치는 기록하지 않음) |
+| 2026-08-18 | 검증 #5 토픽 이름 | ✅ 완료 | 택한 방식: **ros1_bridge remap 사용** (§8-(1) 네임스페이스 불일치를 remap으로 해결) |
+| 2026-08-18 | ROS_DOMAIN_ID | ✅ 확정 | **기본값(0)** 사용, 브릿지와 ROS2 주행 노드 모두 동일 |

@@ -75,10 +75,13 @@ E:\자율주행\auto\
 │   │   │   ├── my_driver/       판단(FSM)·제어
 │   │   │   │                    tools/sim_check.py (폐루프 시뮬)
 │   │   │   ├── my_slam/         매핑/측위 + waypoint 도구
-│   │   │   ├── my_debug/        파이프라인 시각화 뷰어 (drive*.launch.py debug:=true)
+│   │   │   ├── my_debug/        주행 시각화. pipeline_view_node(카메라 시점, OpenCV) +
+│   │   │   │                    viz_node(공간 시점, RViz2 피더) + config/drive.rviz
+│   │   │   │                    (drive*.launch.py 에 rviz:=true / debug:=true)
 │   │   │   ├── my_bringup/      ★ 통합 launch + config/drive_params.yaml
 │   │   │   │                    (모든 튜닝 파라미터가 여기 한 파일에)
-│   │   │   └── DEPLOY_AMD.md    ★ AMD 차량(서울대 대회)에 이 폴더째 복사하는 절차
+│   │   │   ├── DEPLOY_AMD.md    ★ AMD 차량(서울대 대회)에 이 폴더째 복사하는 절차
+│   │   │   └── VEHICLE_TEST.md ★ 실차 연결 테스트 체크리스트 (차 꽂기 전에 열 것)
 │   │   ├── xycar_motor/      ★ VESC 모터 노드 (ROS1→ROS2 이식 완료)
 │   │   ├── vesc/             f1tenth/vesc (ros2 브랜치) — 그대로 사용
 │   │   ├── xycar_device/     센서 드라이버 (cam/lidar/imu/ultrasonic/msgs)
@@ -87,7 +90,7 @@ E:\자율주행\auto\
 │   │   └── vesc, xycar_motor, my_motor
 │   └── Desktop/              센서·시뮬 참고 소스
 │       ├── sllidar_ros2, rf2o_laser_odometry, shortcut_slam, xycar_simulator
-├── xycar_ws_amd/src/         ★ AMD 차량 벤더 워크스페이스 (amd.zip 원본 그대로 + study)
+├── xycar_ws/src/         ★ AMD 차량 벤더 워크스페이스 (amd.zip 원본 그대로 + study)
 │   ├── study/                 amd/xycar_ws/src/study 와 동일 (my_perception 등 6개)
 │   ├── track_drive/           조직위 벤더 원본 (미수정)
 │   ├── xycar_application/     조직위 벤더 원본, app_* 데모 10개 (미수정)
@@ -142,7 +145,7 @@ E:\자율주행\auto\
 
 | 토픽 | 타입 | 내용 |
 |---|---|---|
-| `/lane` | `Float32MultiArray` | `[offset_near, offset_far, valid, quality]` |
+| `/lane` | `Float32MultiArray` | `[offset_near, offset_far, valid, quality, half_near, half_far]`<br>`half_*` 는 학습된 트랙 반폭(px). 회피 목표(§5-3-1)에 쓴다. 0이면 미학습 |
 | `/light` | `Int32` | `0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT` (투표 확정값) |
 | `/objects` | `Float32MultiArray` | `[cone_n, car_present, car_cx, car_area]` |
 | `/obstacle` | `Float32MultiArray` | `[front_dist, left_free, right_free]` |
@@ -239,6 +242,139 @@ WAIT_LIGHT ──GREEN──→ LANE_DRIVE ──분기점──→ SHORTCUT ─
 - **추월**: `LANE_DRIVE` 안의 일시적 서브행동. 끝나면 자동 복귀.
 - **SLAM 위치는 보조(advisory)**, 차선추종이 주(primary).
   SLAM이 틀어져도 주행은 차선만으로 계속되어야 한다.
+
+### 5-3-1. 방해차량 회피 — 트랙 반쪽의 중앙으로
+
+FSM 을 늘리지 않고 `LANE_DRIVE` 안의 **서브행동**으로 둔다 (`my_driver/lateral.py`).
+상태로 빼면 복귀가 지저분해지고, 회피는 "어디를 따라갈지"의 문제라 횡방향 목표
+결정에 속하기 때문이다.
+
+```
+IDLE ──(트리거)──▶ SHIFT ──▶ PASS ──▶ RETURN ──▶ IDLE ──(쿨다운)──
+                  벌리는 중   유지     복귀
+```
+
+**회피량 = 트랙 반폭 / 2 = 트랙 반쪽의 중앙**
+
+```
+왼쪽 반 중앙   = (왼쪽 흰실선 + 노란선) / 2 = 트랙중앙 − 반폭/2
+오른쪽 반 중앙 = (노란선 + 오른쪽 흰실선) / 2 = 트랙중앙 + 반폭/2
+```
+
+`LaneEstimator` 가 좌우 흰선을 동시에 볼 때마다 **행별 반폭을 EMA 로 이미 학습**하고
+있다(§5-1). 그 값을 `/lane` 에 실어 보내 회피량으로 쓴다. 고정 픽셀로 미는 것과 달리
+**원근·트랙폭이 자동 반영되고, 목표가 항상 트랙 안쪽이라 실선을 넘는 상황이 구조적으로
+생기지 않는다.** 반폭 미학습이면 `shift_px` 로 폴백한다.
+
+**트리거** (모두 만족): 차량 검출 · `bottom_y ≥ trigger_bottom_y`(가까움) ·
+라이다 `front_dist ≤ 임계`(오검출 교차확인) · 피할 쪽 여유 · 쿨다운 아님.
+
+**PASS 종료는 시간이 아니라 관측**이다. 통과 시간은 속도에 따라 달라져 고정 시간으로는
+못 맞춘다.
+
+| 종료 조건 | 뜻 |
+|---|---|
+| `car gone` | 차량이 안 보임 |
+| `car receding` | `bottom_y` 가 임계×0.85 아래 (멀어짐) |
+| `car at edge` | `cx` 가 화면 가장자리 (옆으로 지나침) |
+| `front clear` | 라이다 전방이 트임 (라이다 쓸 때만) |
+| `pass timeout` | 위 어느 것도 안 걸릴 때의 안전 상한 |
+
+**회피 중에는 감속한다** (`speed.overtake_factor: 0.7`). 옆으로 벌리면 전방 장애물이
+라이다 섹터에서 빠져 `front_dist` 가 커지고, 그러면 장애물 상한이 풀려 **가장 위험한
+순간에 오히려 가속**하기 때문이다.
+
+**복귀 후 쿨다운** (`cooldown_sec: 1.0`) — 없으면 같은 차에 다시 걸려 지그재그한다.
+
+#### 실측 검증 (2026-08-19, `테스트용(신호등미포함).mp4`)
+
+영상 전체에서 방해차량은 643프레임 샘플 중 110프레임(약 17%)에 나온다. 그중 한 구간:
+
+```
+f2400  IDLE    target=  +0.0px  half=376
+f2741  SHIFT   ← 트리거. cx=440(오른쪽) → 왼쪽으로,  183px = half(367)/2
+f2766  PASS    target=-183.3px
+f2798  RETURN  ← "car at edge(cx593)"
+f2829  IDLE    ← 복귀 완료, 쿨다운 진입
+```
+
+`car at edge` 조건이 없었을 때는 `pass timeout(1.5s)` 으로 f2811 에 복귀했다 —
+**옆을 스쳐 지나가는 차는 가까워지면서 화면 밖으로 나가므로**(cx 440→612 인데
+bottom_y 는 302→439 로 증가) `bottom_y` 만으로는 통과를 못 잡는다. 이 조건 덕분에
+약 0.4초 일찍 트랙 중앙으로 복귀한다.
+
+ROS 통합 실행에서도 `ov=- → SHIFT → PASS → RETURN` 과 속도 12.0→8.4 감속을 확인했다:
+
+```bash
+ros2 launch my_bringup replay.launch.py video:=~/테스트용.mp4 \
+    enable:=true start_frame:=2350 rate_scale:=0.5
+```
+
+> ⚠️ 영상만으로 시험할 때는 `lidar_confirm:=false`(replay 기본값)라 라이다 교차확인이
+> 꺼진다. **실차에서는 `require_lidar_confirm: true` 를 반드시 유지할 것** — 카메라
+> 오검출 하나로 트랙을 벗어나는 것을 막는 유일한 방어선이다.
+
+### 5-3-2. 라바콘 S자 구간 — 라이다 복도 추종
+
+콘이 좌우 두 줄로 **복도(벽)** 를 이루고 그 복도가 S자로 굽어 있다. 우측 콘 벽이 흰
+실선보다 안쪽이라 페인트 차선 중심을 따라가면 콘을 친다. 이 구간만 라이다가 주 센서다.
+
+**전환은 스위치가 아니라 연속 혼합이다** (`fusion.py`). YOLO 콘 개수(`cone_n`)로 복도
+가중치를 정하되 `weight_rate_per_sec: 1.5` 로 최소 0.67초에 걸쳐 옮긴다. 딱 끊으면
+전환 순간 목표가 **120px 점프**하고 그게 조향에 그대로 실린다(실측).
+
+#### 중앙선 추정 사다리 (`corridor.py`) — `lane.py` 와 대칭
+
+| 순서 | 방식 | quality |
+|---|---|---|
+| 1 | **walls** — 좌/우 벽을 각각 폴리핏 후 두 곡선의 중점 | 1.0 |
+| 2 | **refine** — 1차 추정 곡선에 **수직**으로 좌우 벽을 재측정 | 0.8 |
+| 3 | **bins** — 구간별 중점을 바로 피팅 (종전 방식) | 0.4~ |
+
+**왜 필요했나:** 종전 방식은 x축에 수직인 슬라이스로 좌우 벽을 찾는데, 복도가 굽으면
+그 슬라이스가 복도를 비스듬히 자른다. 중점이 곡선 안쪽으로 편향되고, 곡률이 클수록
+커지며 먼 평가지점에서 크게 나타난다. **S자가 정확히 그 구간이다.**
+
+이 오차가 중요한 이유: `SteeringController` 는 `offset_far − offset_near` 를 곡률
+선행보상으로 쓴다. far 가 과소평가되면 S자에서 선행보상이 부족해 안쪽으로 파고든다.
+
+#### 실측 (2026-08-19, 합성 S자 코스를 따라 전진하며 15지점 평가)
+
+| 코스 | 종전 `far` 오차 | 사다리 적용 후 |
+|---|---|---|
+| 완만 S (0.25·sin1.6x) | 91.7px | **31.2px** |
+| 중간 S (0.30·sin2.0x) | 148.7px | **97.4px** |
+
+폐기한 후보 (측정으로 걸러냄):
+
+| 후보 | 결과 |
+|---|---|
+| 3차 다항식 피팅 | 2차 77.0px vs 3차 85.9px — **오히려 나쁨** |
+| 관심영역 2.2m → 3.5m | 226px vs 228px — **효과 없음** |
+| `wall_min_bins` 2~3 | 4일 때가 최선 (51.5 → 31.2px). 3 이하는 점 3개=계수 3개라 보간이 되어 노이즈를 탄다 |
+| refine 밴드 1.5~2배 | 97 → 169 → 192px — 반대편 벽 점이 빨려들어와 **크게 악화** |
+
+#### 시각화 — 콘 구간 튜닝에는 사실상 필수
+
+`obstacle_node` 가 `publish_viz: true` 일 때 두 토픽을 낸다 (진단 전용, 제어는
+`/corridor` 픽셀 오프셋만 사용):
+
+| 토픽 | 내용 |
+|---|---|
+| `/corridor_path` | 복도 중앙선 (`nav_msgs/Path`, 라이다 좌표) |
+| `/cone_walls` | **벽으로 채택된 콘 점** (좌 초록 / 우 빨강) + 중앙선 |
+
+숫자만 보고는 "왜 저 오프셋이 나왔는지" 알 수 없다. 어느 점을 벽으로 골랐는지 봐야
+`x_max` / `bin_size` / `max_lateral` 을 튜닝할 수 있다.
+
+RViz 의 `/viz/markers` 는 **지금 무엇을 따르는지 색으로** 보여준다:
+**노랑 = 차선(lane) · 주황 = 혼합(blend) · 빨강 = 복도(corridor)**.
+로그에는 어떤 사다리 단계를 썼는지가 `[walls]` / `[refine]` / `[bins]` 로 찍힌다.
+
+> ⚠️ **위 숫자는 전부 합성 데이터다.** 실제 콘 간격·복도 폭·라이다 반사 특성은
+> rosbag 이 있어야 검증된다(`corridor_sim.py` 주석). **다음 실차 세션에서 콘 구간
+> `/scan` 을 `ros2 bag record` 로 꼭 따 올 것** — `rosbag_reader.py` 가 ROS 없이
+> 읽도록 이미 만들어져 있어서 그것만 있으면 실제 값으로 재튜닝할 수 있다.
 
 ### 5-4. 제어 전략 — 단계적 융합
 
@@ -422,6 +558,11 @@ ros2 launch my_bringup drive_amd.launch.py
 | 목적 | 명령 |
 |---|---|
 | 전체 주행 | `ros2 launch my_bringup drive.launch.py` |
+| **전체 주행 + 시각화** | `ros2 launch my_bringup drive.launch.py rviz:=true` |
+| **전체 주행 + 시각화 (AMD)** | `ros2 launch my_bringup drive_amd.launch.py rviz:=true` |
+| 시각화만 (주행 스택이 이미 떠 있을 때) | `ros2 launch my_debug viz.launch.py` |
+| **영상 파일로 실시간 재생 테스트** | `ros2 launch my_bringup replay.launch.py video:=~/test.mp4` |
+| **실차 사전 점검** ★ | `python3 my_bringup/tools/preflight.py` (연결 후 `--live`) |
 | 인지만 (디버깅) | `ros2 launch my_perception perception.launch.py` |
 | 제어만 재시작 | `ros2 launch my_driver driver.launch.py` |
 | 지도 생성 | `ros2 launch my_slam mapping.launch.py` |
@@ -434,6 +575,177 @@ ros2 launch my_bringup drive_amd.launch.py
 
 **젯슨에서 주의**: `ultralytics`/`torch`는 PyPI x86 휠이 아니라 **NVIDIA Jetson용 휠**을
 써야 한다. 추론 속도가 부족하면 `best5.pt`를 **TensorRT로 export**할 것.
+
+### 영상 파일로 실시간 재생 테스트 (카메라·라이다·모터 없이)
+
+```bash
+ros2 launch my_bringup replay.launch.py video:='/home/e-on/테스트용(신호등미포함).mp4'
+```
+
+`my_debug/video_pub_node` 가 영상을 **원래 fps 로 실시간** 재생해 `/image_raw` 로 내보내고,
+그 뒤로는 실차와 **완전히 같은 노드·같은 파라미터**가 돈다. 카메라·라이다 드라이버와
+모터 스택은 아예 띄우지 않는다.
+
+```
+video_pub_node → /image_raw → perception_node → /lane /light /objects
+                                              → driver_node → /xycar_motor
+                                              → 시각화 2창 (OpenCV + RViz2)
+```
+
+**`offline_check.py` 와 뭐가 다른가:** 그쪽은 인지 모듈만 ROS 없이 최대 속도로 돌린다
+(인지 *정확도* 검증). 이쪽은 실시간 재생이라 **보드가 30fps 를 따라가는지**가 드러난다 —
+그건 정확도와 다른 문제고, AMD 차량에서 "가다 멈추고"를 일으킨 바로 그 문제다.
+
+주요 인자:
+
+| 인자 | 기본 | 설명 |
+|---|---|---|
+| `video` | (필수) | 재생할 영상 파일 |
+| `rate_scale` | `1.0` | 재생 배속. `0.5` 면 절반 속도로 천천히 |
+| `loop` | `true` | 끝나면 처음부터 다시 |
+| `width`/`height` | `640`/`480` | 발행 해상도. ⚠️ `driver_node.image_width` 와 맞춰야 조향 중심이 안 틀어진다 (테스트 영상이 632px 여도 640 으로 늘려 내보내는 이유) |
+| `rviz` | `true` | RViz2 도 띄울지 |
+| `overrides_file` | (없음) | AMD 차량에서 재생하면 `config/amd_overrides.yaml` 을 줄 것 |
+| `auto_start` | `true` | 신호등 없이 바로 `LANE_DRIVE` 로 시작. ⚠️ 아래 표 |
+| `enable` | `false` | `/drive_enable` 자동 켜기. ⚠️ 아래 표 |
+
+#### ⚠️ `angle=0 speed=0` 만 나올 때 — 원인은 둘 중 하나다
+
+| 화면 표시 | 원인 | 해결 |
+|---|---|---|
+| `WAIT_LIGHT  ref[none]  why: wait` | FSM 이 **초록불을 기다리는 중.** `fsm.auto_start` 기본값이 false 라 신호등 없는 영상에서는 영원히 출발하지 않는다 | `replay.launch.py` 는 이 값을 **true 로 뒤집어** 놓았다(실차 launch 는 그대로). 신호등 로직 자체를 시험하려면 `auto_start:=false` |
+| `LANE_DRIVE ... why: disabled` | `/drive_enable` 이 아직 false | `enable:=true` 를 주거나 다른 터미널에서 직접 발행 |
+
+시각화 텍스트의 **`why:` 줄이 그 답을 그대로 보여준다** (`disabled` / `wait` /
+`no_lane_yet` / `stale(..)` / `ref lost` / 정상 주행 시엔 감속 사유).
+
+모터 명령까지 확인하려면:
+
+```bash
+ros2 launch my_bringup replay.launch.py video:=~/test.mp4 enable:=true
+```
+
+`enable:=false`(기본)에서도 인지 계산은 전부 돌고 화면에 나오지만, FSM 이 `disabled`
+경로로 빠져 조향·속도는 0 으로 고정된다. `enable:=true` 는 **모터 스택이 없는 벤치에서만**
+쓸 것 — 특히 AMD 차량은 모터 드라이버 ROS1 도커가 **상시 떠 있으므로**(§3) 이 launch 가
+모터를 안 띄워도 `/xycar_motor` 발행만으로 차가 실제로 달린다.
+
+**라이다가 없으므로** `/scan` `/obstacle` `/corridor` 는 오지 않는다. `driver_node` 의
+`front_dist` 기본값이 99.0m(전방 개활)이라 장애물 로직은 놀고 **차선추종만** 검증된다.
+그래서 이 launch 는 `obstacle_node` 를 아예 띄우지 않는다.
+
+#### 실측 (2026-08-18, 젯슨 Orin + `테스트용(신호등미포함).mp4` 632x480 29.97fps)
+
+**GPU 가속은 실제로 걸려 있다.** torch 2.8.0 / `cuda_available=True` / device `Orin`,
+모델 파라미터·검출 결과 모두 `cuda:0`. `perception_node` 는 `model.predict()` 에 device 를
+지정하지 않는데, ultralytics 가 CUDA 를 자동 선택하므로 별도 설정이 필요 없다.
+
+| 측정 | 값 |
+|---|---|
+| `video_pub_node` 발행 | 30.0 fps (영상 원래 속도) |
+| **파이프라인 실측 (`perception_node`)** | **11~13 fps** — 영상 속도의 약 1/3 |
+| YOLO `predict()` 단독 | 22 fps (45 ms/프레임) |
+| `predict` + `extract`+`lane` | 16 fps (62 ms/프레임) |
+| `publish_debug_image` on/off 차이 | **거의 없음** (둘 다 11~13 fps) |
+
+즉 병목은 **YOLO 추론 45ms** 이고, 그 위에 마스크 후처리(`detect.extract` + 차선 폴리핏)가
+**16ms 를 더 얹는다**(전체의 약 26%, 순수 CPU). 시각화 창은 병목이 아니다.
+`stale_timeout_sec` 은 프레임 주기 ~0.09s 대비 0.5s 라 젯슨에서는 여유가 있지만,
+AMD 차량은 CPU 추론이라 훨씬 느리므로 `amd_overrides.yaml` 의 `1.0` 이 필요한 이유가
+여기서 재확인된다.
+
+**TensorRT(`best5.engine`)는 실제로 빠르다 — 단 `task='segment'` 를 반드시 줘야 한다.**
+
+| 로드 방식 | 순수 추론 | 실영상 전체 파이프라인 | 검출 결과 |
+|---|---|---|---|
+| `.pt` | 38.5 ms | 63.2 ms (15.8 fps) | dashed 71 / solid 85 / cone 33 |
+| `.engine` (task 미지정) | 38.6 ms | — | — |
+| `.engine` `task='segment'` | **12.9 ms** | **44.8 ms (22.3 fps)** | dashed 70 / solid 85 / cone 33 |
+
+`task` 를 안 주면 ultralytics 가 `detect` 로 오인식해 **가속이 전혀 안 걸린다**(`.pt` 와
+같은 38.6ms). 이 함정 때문에 처음엔 "이득 없음"으로 잘못 측정했다가 정정했다. 제대로
+주면 순수 추론 **3배**, 전체 파이프라인 **1.4배**이고 검출 결과는 사실상 동일하다.
+
+launch 기본값이 `.pt` 인 것은 **이식성** 때문이다 — `.engine` 은 빌드한 보드의
+TensorRT/CUDA 버전에 종속돼 다른 장비로 복사할 수 없다(`.gitignore` 에도 들어 있다).
+쓰려면 그 보드에서 직접 export 하고 `model_path:=.../best5.engine` 로 지정한다.
+
+⚠️ 이 영상에는 신호등이 없는데도 로그에 `light=RED` 가 한 번 떴다. 투표 로직이 걸러야 할
+오검출이 실제로 존재한다는 뜻이므로, 신호등 튜닝 시 이 영상으로 오검출률을 먼저 확인할 것.
+
+### 주행 시각화 — 명령 한 줄로 두 창
+
+```bash
+# 이 한 줄이면 주행 스택 + 시각화 창 2개가 모두 뜬다
+ros2 launch my_bringup drive_amd.launch.py rviz:=true      # AMD 차량
+ros2 launch my_bringup drive.launch.py     rviz:=true      # 젯슨 차량
+```
+
+뜨는 창은 **두 개**다. 보는 축이 달라서 하나로 합칠 수 없다.
+
+| 창 | 무엇을 보나 | 띄우는 노드 |
+|---|---|---|
+| `xycar pipeline` (OpenCV) | **카메라 시점.** 좌: YOLO 검출 박스 / 우: 차선 추정(변환 결과)·전방주시점, 하단 바에 판단(FSM)·계획·제어 텍스트 | `my_debug/pipeline_view_node` |
+| RViz2 | **공간 시점(top-down).** 라이다 포인트클라우드, 차량 오도메트리, 지나온 궤적·예측 경로·기준 경로 | `my_debug/viz_node` + `rviz2 -d drive.rviz` |
+
+`rviz:=true` 는 `perception_node` 의 `publish_debug_image` 도 자동으로 켠다
+(그래야 좌/우 2분할 영상이 `/debug_image` 로 나온다). 카메라 창만 필요하면
+`debug:=true` 만 줘도 된다.
+
+**RViz2 설정 파일:** `my_debug/config/drive.rviz` — 아래 패널이 이미 등록돼 있다.
+
+| 패널 | 토픽 | 내용 |
+|---|---|---|
+| Image | `/debug_image` | 좌 YOLO / 우 차선 2분할 (기본 켬) |
+| Image | `/image_raw` | 원본 카메라 (기본 끔 — 필요할 때 체크) |
+| LaserScan | `/scan` | 라이다 원시 스캔 |
+| PointCloud2 | `/viz/scan_cloud` | `viz_node` 가 변환한 포인트클라우드 |
+| Odometry | `/viz/odom` | 차량 위치·자세 (빨강 화살표) |
+| Path | `/viz/driven_path` | 지나온 궤적 (흰색) |
+| Path | `/viz/plan_path` | 현재 조향/속도 명령의 예측 경로 (초록) |
+| Path | `/viz/ref_path` | 라바콘 복도 중앙선 = 추종 기준 (노랑) |
+| MarkerArray | `/viz/markers` | FSM 상태 텍스트 / 전방 최근접 거리 / 차체 |
+
+**오도메트리가 없어도 경로가 보이는 이유:** 이 차량은 기본 구성에 오도메트리가 없다
+(SLAM 을 켜야 `/odom_rf2o` 가 생긴다). `viz_node` 는 `/odom` 이 1초간 안 오면
+**발행한 조향/속도 명령을 자전거 모델로 적분해** `/viz/odom` 과 `odom→base_link` TF 를
+직접 낸다. 추측항법이라 시간이 지나면 반드시 어긋난다 — 경로 *모양*을 보기 위한
+것이지 측위가 아니다. 진짜 측위가 필요하면 SLAM 을 켜고, `drive_params.yaml` 의
+`viz_node.odom_topic` 을 `/odom_rf2o` 로 바꾼다 (그러면 추측항법이 자동으로 꺼진다):
+
+```bash
+ros2 launch my_bringup drive_amd.launch.py rviz:=true slam:=true
+```
+
+**튜닝값**은 전부 `my_bringup/config/drive_params.yaml` 의 `viz_node:` 섹션에 있다.
+명령값(임의 단위) → 미터 환산(`speed_to_mps`, `max_steer_deg`)이 틀리면 예측 경로
+길이만 어긋난다(주행에는 영향 없음). 예측 경로가 좌우 **반대**로 휘면 `angle_sign`
+부호를 뒤집을 것.
+
+⚠️ **시각화는 CPU 를 쓴다.** AMD 차량은 YOLO 가 CPU 추론이라 이미 병목이므로,
+기록 주행·실전에서는 `rviz`/`debug` 를 **둘 다 끄고**(기본값) 돌릴 것.
+
+### 실차 연결 테스트 — `preflight.py` 부터
+
+차량에 전원을 넣기 전에 **반드시** 이것부터 돌린다.
+
+```bash
+cd ~/xycar_ws && source install/setup.bash
+python3 src/study/my_bringup/tools/preflight.py            # 정적 점검 (ROS 실행 불필요)
+python3 src/study/my_bringup/tools/preflight.py --live     # 센서 launch 후 토픽 실측
+```
+
+한 번에 판정하는 것: ROS 환경 · 워크스페이스 빌드 여부와 **최신성** · CUDA/ultralytics ·
+YOLO 가중치 · 카메라/라이다/VESC 장치 · udev 심볼릭 링크 · `vesc.yaml` 의 `port` 가 실제로
+존재하는 경로인지 · `drive_params.yaml` 정합성. `--live` 는 여기에 `/image_raw` `/scan`
+실측 Hz 와 **카메라 해상도 vs `driver_node.image_width` 일치 여부**를 더한다
+(어긋나면 조향이 계통적으로 한쪽으로 치우치는데, 눈으로는 못 잡는 종류의 버그다).
+
+실패 항목마다 `[조치]` 줄에 고치는 방법이 그대로 나온다. 실패가 하나라도 있으면
+종료 코드 1 이고, **그 상태로 `/drive_enable` 을 켜지 않는다.**
+
+전체 순서(연결 → 빌드 → 센서만 → 들어올리고 조향 → 저속 주행)와 증상별 대처는
+**`study/VEHICLE_TEST.md`** 에 체크박스 형태로 정리돼 있다.
 
 ### 센서 udev 규칙 — 젯슨 보드마다 별도로 설정해야 함
 

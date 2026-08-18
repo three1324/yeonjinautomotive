@@ -51,6 +51,12 @@ def generate_launch_description():
             description='파라미터 yaml. 비우면 노드 기본값 사용'),
         DeclareLaunchArgument(
             'model_path', default_value=default_model,
-            description='YOLO 가중치 경로'),
+            description=(
+                'YOLO 가중치 경로. 기본은 이식성 있는 best5.pt(PyTorch, GPU 자동 사용). '
+                '더 빠른 추론이 필요하면 같은 models/ 안의 best5.engine(TensorRT, '
+                'YOLO(...).export(format="engine", device=0, half=True, imgsz=[480,640])로 '
+                '이 젯슨에서 직접 생성, 다른 장비로 복사 불가)을 '
+                'model_path:=.../best5.engine 로 지정한다.'
+            )),
         OpaqueFunction(function=make_node),
     ])

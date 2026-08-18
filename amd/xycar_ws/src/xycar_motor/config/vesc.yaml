@@ -30,7 +30,7 @@ vesc_driver:
     #
     # 또한 vesc_interface.cpp 에서 흐름제어를 HARDWARE -> NONE 으로 고쳐두었다.
     # UART 에는 RTS/CTS 핀이 없어서 그대로 두면 송신이 막힌다. (해당 파일 주석 참고)
-    port: /dev/ttyMOTOR
+    port: /dev/ttyUSB0
     duty_cycle_min: 0.005
     duty_cycle_max: 0.950
     current_min: -60.0
