@@ -455,7 +455,7 @@ git clone https://github.com/ros-drivers/ackermann_msgs.git ~/noetic_ws/src/acke
 ```bash
 docker rmi osrf/ros:noetic-xycar
 rm -rf ~/noetic-xycar
-rm -rf ~/noetic_ws/devel ~/noetic_ws/build     # 새 이미지로 다시 catkin_make 해야 함
+sudo rm -rf ~/noetic_ws/devel ~/noetic_ws/build     # root 소유일 수 있어 sudo. 새 이미지로 다시 catkin_make 해야 함
 ```
 
 **패키지 개수로 검증 — 236개에 근접해야 한다:**
@@ -466,18 +466,31 @@ docker run --rm osrf/ros:noetic-xycar bash -lc "dpkg -l | grep -c '^ii  ros-noet
 
 ### Step 2 — 컨테이너 안에서 ROS1 워크스페이스 빌드
 
+> ⚠️ **`--user "$(id -u):$(id -g)"` 를 반드시 넣을 것.** 이게 없으면
+> 컨테이너 안 root 가 마운트된 `~/noetic_ws` 에 파일을 만들어서, 호스트
+> 계정(`e-on`)이 나중에 그 파일을 못 지운다(`Permission denied`, 겪어본
+> 문제). 이 옵션은 빌드 산출물의 파일 소유권에만 영향을 주고 컴파일
+> 결과 자체는 바꾸지 않으므로 "원본과 동일" 원칙과 무관하다.
+
 ```bash
 docker run -it --rm \
+  --user "$(id -u):$(id -g)" \
   -v ~/noetic_ws:/root/noetic_ws \
+  -e HOME=/root/noetic_ws \
   osrf/ros:noetic-xycar \
   bash -c "source /opt/ros/noetic/setup.bash && cd /root/noetic_ws && catkin_make"
 ```
 
-성공하면 `~/noetic_ws/devel/` 이 **arm64로** 새로 생긴다.
+**[확인]** `--user` 로 non-root 진입 시 `$HOME` 이 `/root` 로 잡혀 쓰기 권한이
+없을 수 있다. 위처럼 `-e HOME=/root/noetic_ws` 로 우회했는데도 에러가 나면
+`bash -c` 안에서 `export HOME=/tmp` 를 앞에 추가할 것.
 
-**[확인]** zip에서 나온 기존 `devel/`, `build/` 는 x86_64 잔재다. 빌드 전에 지울 것:
+성공하면 `~/noetic_ws/devel/` 이 **arm64로, 호스트 계정 소유로** 새로 생긴다.
+
+**[확인]** zip에서 나온 기존 `devel/`, `build/` 는 x86_64 잔재다. 빌드 전에 지울 것.
+**이전에 `--user` 없이 빌드해서 root 소유 파일이 남아있다면 `sudo` 로 지울 것:**
 ```bash
-rm -rf ~/noetic_ws/devel ~/noetic_ws/build
+sudo rm -rf ~/noetic_ws/devel ~/noetic_ws/build
 ```
 
 빌드 대상 확인 — 다음 4개가 나와야 한다: `vesc_msgs`, `vesc_driver`,
@@ -614,6 +627,18 @@ speed: 65536.0 (=2^16)    distance_traveled: 131072 (=2^17)
 
 원본이 쓰는 옵션이다. 시리얼 접근과 roscore 통신에 필요하므로 그대로 둘 것.
 젯슨에서도 동일하게 동작한다.
+
+### (6) `catkin_make` 를 컨테이너 root 로 돌리면 마운트 파일이 root 소유가 된다 (겪은 문제)
+
+Step 2 에서 `--user "$(id -u):$(id -g)"` 없이 `docker run` 하면, 컨테이너 안
+root 가 `-v ~/noetic_ws:/root/noetic_ws` 로 마운트된 호스트 디렉토리에
+파일을 쓰고, 그 파일들이 **호스트에서도 root 소유**로 남는다. 이후
+`rm -rf ~/noetic_ws/devel` 을 호스트 계정(`e-on`)으로 실행하면 수백 줄의
+`Permission denied` 가 뜬다. 실제로 겪은 문제이며, Step 2 명령에
+`--user` 를 넣어 예방하도록 이미 반영했다 — 빠뜨리지 말 것.
+
+**이미 root 소유 파일이 생겼다면**: `sudo rm -rf` 로 지우면 된다
+(빌드 산출물일 뿐이라 삭제해도 안전 — 다시 `catkin_make` 하면 된다).
 
 ---
 
