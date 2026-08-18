@@ -10,7 +10,7 @@
 
 안전: driver_node 는 require_enable=true 이므로 이 launch 를 띄워도 차는 움직이지 않는다.
       출발시키려면 별도로:
-          ros2 topic pub --once /drive_enable std_msgs/Bool '{data: true}'
+          ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
 """
 
 import os

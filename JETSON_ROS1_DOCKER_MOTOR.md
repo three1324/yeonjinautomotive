@@ -363,11 +363,11 @@ chmod +x ~/xycar_ws/etc/motor_vesc/motor
 
 ```bash
 # 조향만 (speed=0) — 안전
-ros2 topic pub -r 10 /xycar_motor std_msgs/Float32MultiArray '{data: [30.0, 0.0]}'
-ros2 topic pub -r 10 /xycar_motor std_msgs/Float32MultiArray '{data: [-30.0, 0.0]}'
+ros2 topic pub -r 10 /xycar_motor std_msgs/msg/Float32MultiArray '{data: [30.0, 0.0]}'
+ros2 topic pub -r 10 /xycar_motor std_msgs/msg/Float32MultiArray '{data: [-30.0, 0.0]}'
 
 # 정지
-ros2 topic pub --once /xycar_motor std_msgs/Float32MultiArray '{data: [0.0, 0.0]}'
+ros2 topic pub --once /xycar_motor std_msgs/msg/Float32MultiArray '{data: [0.0, 0.0]}'
 ```
 
 > ⚠️ **구동 테스트는 반드시 차를 들어올려 바퀴가 뜬 상태에서** 할 것.

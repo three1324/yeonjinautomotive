@@ -28,7 +28,7 @@
 
 안전: driver_node 는 require_enable=true 이므로 이 launch 를 띄워도 차는 움직이지 않는다.
       출발시키려면 별도로:
-          ros2 topic pub --once /drive_enable std_msgs/Bool '{data: true}'
+          ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
 
 ⚠️ 이 차량에는 서울대 대회용 `race_*` 패키지가 함께 설치돼 있을 수 있다.
    `race_manager` 도 `xycar_motor` 를 발행하므로 **동시에 띄우면 두 노드가 같은

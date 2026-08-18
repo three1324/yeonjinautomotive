@@ -163,7 +163,7 @@ driver_node:
     require_enable: true
     # ↑ [고정] true면 /drive_enable 을 받기 전까지 speed 0 을 계속 발행한다.
     #   실차에서 갑자기 튀어나가는 것을 막는 안전장치. 실전에서 반드시 true.
-    #   시작:  ros2 topic pub --once /drive_enable std_msgs/Bool '{data: true}'
+    #   시작:  ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
     stale_timeout_sec: 0.5  # [고정] 인지 데이터가 이만큼 끊기면 정지
     lane_lost_stop_sec: 2.0 # [튜닝] 차선을 이만큼 못 보면 정지
     log_period_sec: 1.0

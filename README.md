@@ -373,7 +373,7 @@ python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.30
    ```bash
    ros2 launch my_bringup drive.launch.py
    # 차는 아직 안 움직인다 (require_enable). 출발시키려면:
-   ros2 topic pub --once /drive_enable std_msgs/Bool '{data: true}'
+   ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
    ```
 
 ### AMD 보드 xycar(서울대 대회 차량)로 옮기는 순서

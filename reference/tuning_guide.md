@@ -160,7 +160,7 @@ ros2 launch my_perception perception.launch.py
 **확인 방법**: 차를 들어올린 상태(바퀴 공중)에서 양수 조향 명령을 주고 실제 방향 확인.
 
 ```bash
-ros2 topic pub --once /xycar_motor std_msgs/Float32MultiArray '{data: [20.0, 0.0]}'
+ros2 topic pub --once /xycar_motor std_msgs/msg/Float32MultiArray '{data: [20.0, 0.0]}'
 ```
 
 | 결과 | 조치 |

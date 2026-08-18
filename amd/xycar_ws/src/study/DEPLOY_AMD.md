@@ -88,7 +88,7 @@ ros2 launch my_bringup drive_amd.launch.py
 **차는 아직 안 움직인다** (`require_enable: true` 안전장치). 출발시키려면:
 
 ```bash
-ros2 topic pub --once /drive_enable std_msgs/Bool '{data: true}'
+ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
 ```
 
 ### ⚠️ 반드시 지킬 것 두 가지

@@ -221,7 +221,7 @@ class DriverNode(Node):
         if self.require_enable:
             self.get_logger().warn(
                 "주행 대기중. 시작하려면: "
-                "ros2 topic pub --once /drive_enable std_msgs/Bool '{data: true}'"
+                "ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'"
             )
         self.get_logger().info(f"driver_node 시작 ({hz:.0f}Hz)")
 
