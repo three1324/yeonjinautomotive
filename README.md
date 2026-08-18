@@ -75,8 +75,9 @@ E:\자율주행\auto\
 │   │   │   ├── my_driver/       판단(FSM)·제어
 │   │   │   │                    tools/sim_check.py (폐루프 시뮬)
 │   │   │   ├── my_slam/         매핑/측위 + waypoint 도구
-│   │   │   └── my_bringup/      ★ 통합 launch + config/drive_params.yaml
-│   │   │                        (모든 튜닝 파라미터가 여기 한 파일에)
+│   │   │   ├── my_bringup/      ★ 통합 launch + config/drive_params.yaml
+│   │   │   │                    (모든 튜닝 파라미터가 여기 한 파일에)
+│   │   │   └── DEPLOY_AMD.md    ★ AMD 차량(서울대 대회)에 이 폴더째 복사하는 절차
 │   │   ├── xycar_motor/      ★ VESC 모터 노드 (ROS1→ROS2 이식 완료)
 │   │   ├── vesc/             f1tenth/vesc (ros2 브랜치) — 그대로 사용
 │   │   ├── xycar_device/     센서 드라이버 (cam/lidar/imu/ultrasonic/msgs)
@@ -374,6 +375,39 @@ python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.30
    # 차는 아직 안 움직인다 (require_enable). 출발시키려면:
    ros2 topic pub --once /drive_enable std_msgs/Bool '{data: true}'
    ```
+
+### AMD 보드 xycar(서울대 대회 차량)로 옮기는 순서
+
+**같은 소스를 두 차량이 공유한다.** 코드를 복사해 두 벌로 갈라놓지 않았다 —
+대회가 같은 주에 붙어 있어 한쪽 버그 수정이 다른 쪽에 반영되지 않으면 위험하다.
+
+이 차량은 ROS2 Humble 이고 카메라(`/image_raw`)·라이다(`/scan`)·해상도(640×480)·
+모터 토픽(`xycar_motor` `[angle, speed]`, angle ±50)이 젯슨 차량과 **전부 동일**하다.
+다른 점은 두 가지뿐이다:
+
+- **모터 드라이버가 별도 ROS1 도커의 벤더 노드**다. `xycar_motor` 토픽을 상시 구독하고
+  있어서 우리는 발행만 하면 되고, 우리 `xycar_motor`/`vesc` 패키지는 필요 없다
+  (그 차량엔 존재하지도 않는다).
+- **speed 실효 배율이 다르다.** 같은 차량에서 검증된 서울대 코드가 `base_speed` 를
+  12.0 → 4.8 로 낮춰 쓰고 있어 그 값에 맞췄다.
+
+그래서 진입점만 따로 뒀다:
+
+| | 젯슨 (국민대) | AMD (서울대) |
+|---|---|---|
+| launch | `drive.launch.py` | **`drive_amd.launch.py`** |
+| 파라미터 | `drive_params.yaml` | `drive_params.yaml` + **`amd_overrides.yaml`** |
+
+```bash
+scp -r amd/xycar_ws/src/study/ <차량>:~/xycar_ws/src/     # study 폴더만 복사
+# 차량에서
+cd ~/xycar_ws && colcon build --symlink-install && source install/setup.bash
+ros2 launch my_bringup drive_amd.launch.py
+```
+
+⚠️ `race_*` 런치와 동시에 띄우지 말 것 — `race_manager` 도 `xycar_motor` 를 발행한다.
+
+상세 절차·체크리스트·트러블슈팅은 **`amd/xycar_ws/src/study/DEPLOY_AMD.md`**.
 
 ### 실행 명령 요약
 

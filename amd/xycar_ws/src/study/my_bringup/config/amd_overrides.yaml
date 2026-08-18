@@ -1,0 +1,54 @@
+# ============================================================================
+#  AMD 보드 xycar(서울대 대회 차량) 전용 덧씌우기 파라미터
+#
+#  적용:  ros2 launch my_bringup drive_amd.launch.py
+#         (drive_params.yaml 을 먼저 읽고 이 파일이 그 위를 덮는다)
+#
+#  ⚠️ 이 파일에는 **차량이 달라서 값이 달라지는 것만** 넣는다.
+#     알고리즘 튜닝값(차선 피팅, 신호등 투표, 조향 게인 등)은 전부
+#     drive_params.yaml 한 곳에만 두어 두 차량이 같은 값을 공유하게 한다.
+#     여기에 복사해오면 그 순간부터 두 파일이 갈라져 관리가 안 된다.
+#
+#  여기 없는 노드 섹션(perception_node, obstacle_node)은 의도적으로 비워둔 것이다.
+#  카메라 토픽(/image_raw), 라이다 토픽(/scan), 해상도(640x480)가 젯슨 차량과
+#  동일한 것을 서울대 백업 소스에서 확인했으므로 덮을 것이 없다.
+#    - race_lane_yolo/config/race_lane_yolo.yaml : width 640 / height 480
+#    - race_lidar/config/race_lidar.yaml         : scan_topic '/scan'
+#    - race_bringup/launch/race.launch.py        : input_image_topic '/image_raw'
+# ============================================================================
+
+driver_node:
+  ros__parameters:
+    speed:
+      # --- 왜 속도만 다시 잡는가 ---
+      # 토픽 계약은 양쪽이 같다: xycar_motor 에 [angle, speed], angle 은 ±50.
+      # 하지만 speed 의 **실효 배율**이 다르다.
+      #
+      #   젯슨 차량 : 우리가 만든 xycar_motor 노드가 speed 를 VESC ERPM 으로 변환.
+      #               speed_weight=0.08, ERPM 상한 10000/gain 4614 = 2.17 m/s
+      #               -> speed 27 이 물리적 상한이었다.
+      #   AMD 차량 : 모터 드라이버가 별도 ROS1 도커 안의 **벤더 노드**다.
+      #               우리가 그 변환식을 통제하지 못한다.
+      #
+      # 그래서 실측 근거가 있는 쪽을 따른다. 같은 AMD 차량에서 돌린 서울대
+      # race_lane_planning/config/race_lane_planning.yaml 에 이렇게 적혀 있다:
+      #     base_speed: 4.8   # 기존 12.0의 40% (실차 속도 하향)
+      #     min_speed:  2.0   # 기존 5.0의 40%
+      # 즉 이 차량에서는 12.0 이 실주행에 너무 빨라 40% 로 낮춰 쓴 이력이 있다.
+      # 우리 기본값도 12.0 이므로 그대로 올리면 2.5배 빠르게 나간다.
+      base: 4.8               # [실측근거] 서울대 실차 검증값과 동일하게 맞춤
+      min: 2.0                # [실측근거] 동일
+      limit: 12.0
+      # ↑ [보수적] 젯슨의 27.0 은 VESC ERPM 계산에서 나온 값이라 이 차량엔 근거가 없다.
+      #   일단 젯슨 기본속도(12.0)를 천장으로 두고, 실주행으로 올려가며 확인할 것.
+      accel_per_sec: 8.0      # [비례] 20.0 의 40%. base 를 낮춘 만큼 같이 낮춘다
+      # decel_per_sec 는 덮지 않는다 — 감속은 빠를수록 안전하므로 60.0 을 그대로 쓴다.
+      #
+      # stop_dist / slow_dist / curve_* / quality_* / cone_* 도 덮지 않는다.
+      # 거리는 미터(물리량)라 차량이 바뀌어도 같고, 나머지는 비율이라 그대로 유효하다.
+
+    # --- 조향 게인은 일부러 덮지 않는다 ---
+    # angle 범위(±50)가 같아 그대로 유효하다. 다만 속도가 40% 로 낮아지면 같은
+    # 조향각에서 거리당 회전이 커져 체감 응답이 달라질 수 있다.
+    # 실주행에서 진동하면 drive_params.yaml 의 steer.k_lat 을 낮추는 것이 아니라
+    # **이 파일에 steer 섹션을 추가해서** 덮을 것 (젯슨 값을 건드리지 말 것).
