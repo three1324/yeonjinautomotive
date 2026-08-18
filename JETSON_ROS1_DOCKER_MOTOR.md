@@ -234,6 +234,71 @@ roslaunch xycar_motor xycar_motor.launch
 
 ## 6. 작업 단계
 
+### ⭐ Step 0 — 원본 도커 이미지 확보 (가능하면 반드시)
+
+> **사용자 요구사항: "ROS1 시스템과 도커 시스템이 아예 똑같아야 한다."**
+>
+> §3(1)에서 설명했듯 원본 이미지 `osrf/ros:noetic-xycar` 가 zip에 없다.
+> Step 1의 Dockerfile은 **필요할 것으로 추정되는 패키지**를 넣은 것이라
+> 원본과 다를 수 있다. 조직위가 그 이미지에 무엇을 더 넣었는지 모른다.
+>
+> **AMD 차량(원본 PC)에 접근할 수 있다면 이 단계를 먼저 할 것.**
+> "추정 재현"이 "정확 재현"으로 바뀐다.
+
+**AMD 차량에서:**
+```bash
+docker save osrf/ros:noetic-xycar | gzip > ~/noetic-xycar.tar.gz
+ls -lh ~/noetic-xycar.tar.gz        # 수백 MB ~ 2GB 정도
+```
+
+**젯슨으로 전송 후 (실행은 안 되지만 내용 분석은 된다):**
+```bash
+docker load < noetic-xycar.tar.gz
+
+# (a) 빌드 이력 - 어떤 명령으로 만들어졌는지
+docker history osrf/ros:noetic-xycar --no-trunc
+
+# (b) 베이스 이미지 / 환경변수 / CMD
+docker inspect osrf/ros:noetic-xycar | head -80
+
+# (c) 설치된 패키지 목록 (QEMU 에뮬레이션 필요, 느리지만 됨)
+sudo apt-get install -y qemu-user-static binfmt-support
+docker run --rm --platform linux/amd64 osrf/ros:noetic-xycar dpkg -l > orig_pkgs.txt
+
+# (d) /usr/local/bin/motor 원본 내용 확인 (§5 의 추정이 맞는지)
+docker run --rm --platform linux/amd64 osrf/ros:noetic-xycar cat /usr/local/bin/motor
+```
+
+**얻은 정보로 Step 1의 Dockerfile을 원본과 일치시킬 것.** 특히:
+- `orig_pkgs.txt` 에 있는 `ros-noetic-*` 패키지를 전부 반영
+- `docker history` 에 보이는 `ENV` / `RUN` 을 그대로 재현
+- (d)로 `motor` 스크립트 실제 내용 확인 — §5의 추정과 다르면 실제 것을 쓸 것
+
+**결과를 §11 작업 기록에 남길 것.**
+
+#### Step 0 이 불가능하면 (AMD 차량 접근 불가)
+
+Step 1의 Dockerfile로 진행하되, **이건 추정 재현이라는 점을 사용자에게 명시할 것.**
+동작이 원본과 다르면 누락된 패키지를 의심할 것. 다만 §7 검증을 통과하면
+모터 제어 경로 자체는 동일하게 동작한다 — 소스와 설정값이 원본 그대로이기 때문이다.
+
+#### 무엇이 동일하고 무엇이 동일할 수 없는가 (정직한 정리)
+
+| 요소 | 원본과 동일? |
+|---|---|
+| ROS1 소스코드 (vesc / xycar_motor) | ✅ **바이트 단위 동일** (zip 원본) |
+| `vesc.yaml` 설정값 (ERPM 게인·서보 매핑·speed 한계) | ✅ 동일 |
+| launch 파일, 토픽 계약 | ✅ 동일 |
+| `motor` 스크립트의 docker run 옵션 | ✅ 동일 (홈 경로만 수정) |
+| **CPU 아키텍처** | ❌ x86_64 → arm64. **물리적으로 불가능** |
+| 컴파일된 바이너리 | ❌ 위 때문에 재컴파일 필수 |
+| 도커 이미지 내용물 | ⚠️ Step 0 하면 정확 재현 / 안 하면 추정 재현 |
+
+**모터의 동작을 결정하는 것은 소스코드와 설정값이고 그 둘은 원본 그대로다.**
+아키텍처 차이는 같은 소스를 다른 CPU용으로 컴파일하는 것일 뿐 로직을 바꾸지 않는다.
+
+---
+
 ### Step 1 — ROS1 noetic arm64 이미지 만들기
 
 공식 `ros:noetic-ros-base` 는 멀티아키텍처라 arm64를 지원한다
@@ -462,6 +527,7 @@ ROS2 `xycar_motor` 를 구독 → `docker exec ... rostopic pub` 으로 전달.
 
 | 날짜 | 단계 | 결과 | 비고 |
 |---|---|---|---|
+| | **Step 0 원본 이미지 확보** | | 성공/불가: ___ · 누락 패키지: ___ |
 | | Step 1 이미지 빌드 | | |
 | | Step 2 catkin_make | | |
 | | Step 3 ros1_bridge | | |
