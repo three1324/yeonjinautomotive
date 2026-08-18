@@ -1,0 +1,4 @@
+# 이 폴더는 비어 있지만 반드시 존재해야 한다.
+# git 은 빈 디렉토리를 추적하지 못해서, 이 파일이 없으면 clone 시 폴더가 사라진다.
+# 그러면 CMakeLists 의 install(DIRECTORY ...) 가 폴더를 못 찾아 빌드가 실패한다.
+# (실제로 xycar_lidar/config 가 없어서 젯슨 첫 빌드가 깨졌다)

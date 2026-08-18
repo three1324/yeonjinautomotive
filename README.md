@@ -87,6 +87,13 @@ E:\자율주행\auto\
 │   │   └── vesc, xycar_motor, my_motor
 │   └── Desktop/              센서·시뮬 참고 소스
 │       ├── sllidar_ros2, rf2o_laser_odometry, shortcut_slam, xycar_simulator
+├── xycar_ws_amd/src/         ★ AMD 차량 벤더 워크스페이스 (amd.zip 원본 그대로 + study)
+│   ├── study/                 amd/xycar_ws/src/study 와 동일 (my_perception 등 6개)
+│   ├── track_drive/           조직위 벤더 원본 (미수정)
+│   ├── xycar_application/     조직위 벤더 원본, app_* 데모 10개 (미수정)
+│   ├── xycar_device/          조직위 벤더 원본 (미수정)
+│   ├── yolo_ros/              조직위 벤더 원본 (미수정, .git 제거)
+│   └── VENDORED.md            ★ 이 워크스페이스를 amd/xycar_ws/ 와 분리한 이유
 └── reference/                문서·자료 (빌드 대상 아님)
     ├── perception_analysis.md   ★ 인식 성능 실측 분석 (설계 근거의 원천)
     ├── docs/모터제어기_VESC_설정방법.pdf
