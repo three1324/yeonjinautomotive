@@ -246,9 +246,10 @@ ROS 통합에서도 `ov=- → SHIFT → PASS → RETURN`, 속도 12.0 → 8.4 �
 1. **`drive.launch.py` / `drive_amd.launch.py` 는 끝까지 실행된 적이 없다.**
    센서·모터가 없어 인자 파싱까지만 확인했다.
 2. **라이다 복도 튜닝값은 전부 합성 데이터 기반이다.** 실제 콘 간격·복도 폭·반사
-   특성은 모른다. → **콘 구간 rosbag 을 반드시 딸 것**
-   `ros2 bag record /scan /image_raw /corridor /lane /objects /debug_state`
-   (기본 sqlite3 로. `--storage mcap` 은 `rosbag_reader.py` 가 못 읽는다)
+   특성은 모른다. → **콘 구간 rosbag 을 반드시 딸 것. 절차는 `VEHICLE_TEST.md` §9**
+   (녹화 명령·주행 방법·저장 포맷 주의·녹화 직후 확인·`corridor_sim.py --bag` 재튜닝).
+   특히 `corridor.px_per_meter`(현재 300.0, 가정값)를 먼저 확정해야 한다 — 틀리면
+   라이다 복도와 카메라 차선의 단위가 안 맞아 융합이 통째로 어긋난다.
 3. **회피 기동을 실차에서 `require_lidar_confirm: true` 로 돌려본 적이 없다.**
    영상 검증은 그 조건을 끈 상태였다.
 4. **라이다 포트 문제**(§5) — udev 규칙 등록부터.

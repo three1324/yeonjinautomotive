@@ -122,14 +122,7 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
       (`obstacle_node` 가 이 둘을 낸다. 라이다가 죽어 있으면 둘 다 안 나온다)
 
 - [ ] **★ 콘 구간 rosbag 을 딴다** — 복도 추정 튜닝값이 전부 **합성 데이터 기반**이라
-      실제 콘 간격·복도 폭으로 재검증해야 한다. 콘 코스를 한 바퀴 굴리며:
-
-      ```bash
-      ros2 bag record /scan /image_raw /corridor /lane /objects /debug_state
-      ```
-
-      `my_obstacle/tools/rosbag_reader.py` 가 ROS 없이 읽으므로 PC 에서 재튜닝 가능.
-      ⚠️ `--storage mcap` 으로 녹화하면 그 리더가 못 읽는다. 기본(sqlite3) 로 딸 것.
+      실제 콘 간격·복도 폭으로 재검증해야 한다. **절차는 §9 참고.**
 
 자세한 근거와 로그 원문은 §8.
 
@@ -255,3 +248,101 @@ Display 의 Reliability Policy 를 Best Effort 로 두면 된다(`drive.rviz` �
 전이를 아무것도 emit 하지 않으므로 프로세스는 그냥 일반 노드로 뜨고 동작에는
 문제가 없다. 다만 나중에 `ros2 lifecycle` 로 제어하려 하면 안 먹는다.
 **벤더 패키지라 지금은 건드리지 않았다.**
+
+
+---
+
+## 9. 콘 구간 rosbag 뜨는 법 ★
+
+**왜 필요한가:** `corridor.py` 의 중앙선 추정 개선(far 오차 91.7 → 31.2px)은 전부
+**제가 만든 합성 S자 코스** 기준이다. 실제 콘 간격·복도 폭·라이다 반사 특성은 아직
+모른다. bag 하나만 있으면 `corridor_sim.py --bag` 으로 PC 에서 실제 값으로 재튜닝할 수
+있다 — 차를 다시 굴리지 않고도 파라미터를 몇 번이고 바꿔 볼 수 있다는 뜻이다.
+
+### 9-1. 녹화
+
+라이다가 살아 있는지(§3-1) 먼저 확인한 뒤, **주행 스택을 띄운 상태에서** 녹화한다.
+
+```bash
+# 터미널 1 — 주행 스택 (센서 + 인지/판단. 모터는 안 띄운다)
+ros2 launch my_bringup drive.launch.py motor:=false rviz:=true      # 젯슨
+ros2 launch my_bringup drive_amd.launch.py rviz:=true               # AMD
+
+# 터미널 2 — 녹화 (콘 코스 앞에서 시작)
+cd ~ && ros2 bag record -o cone_$(date +%m%d_%H%M) \
+    /scan /image_raw /corridor /obstacle /lane /objects /debug_state
+```
+
+| 토픽 | 왜 넣나 |
+|---|---|
+| `/scan` | **필수.** 복도 추정을 다시 돌릴 원본 |
+| `/image_raw` | 그때 눈으로 뭐가 보였는지 대조용 (용량이 크다. 아래 참고) |
+| `/corridor` | 그때 추정이 뭐라고 했는지 — 개선 전후 비교 기준 |
+| `/obstacle` `/lane` `/objects` `/debug_state` | 융합·판단이 어떻게 반응했는지 |
+
+**차를 어떻게 움직이나:** 자율주행일 필요 없다. **손으로 밀거나 조종기로 천천히**
+콘 코스를 통과시키면 된다. 중요한 건 콘 사이를 실제로 지나가는 것이다.
+
+- [ ] 콘 구간 **전체를 최소 2~3회** 통과 (직선 진입 → S자 → 빠져나감)
+- [ ] 가능하면 **복도 중앙 / 왼쪽 치우침 / 오른쪽 치우침** 을 각각 한 번씩
+      (한 자세만 있으면 부호·편향 검증이 안 된다)
+- [ ] 속도는 느리게. 프레임이 촘촘할수록 좋다
+
+`Ctrl-C` 로 종료하면 `cone_MMDD_HHMM/` 디렉터리가 생긴다.
+
+### 9-2. ⚠️ 저장 포맷 — 기본(sqlite3) 로 딸 것
+
+```bash
+ros2 bag record --storage mcap ...     # ← 이렇게 하면 안 된다
+```
+
+`rosbag_reader.py` 는 **ROS 설치 없이** 읽으려고 sqlite3+CDR 를 직접 파싱한다.
+mcap 으로 녹화하면 못 읽는다. 이미 mcap 으로 땄다면 젯슨에서:
+
+```bash
+ros2 bag convert -i <mcap_bag> -o converted --storage sqlite3
+```
+
+### 9-3. 딴 직후 — 차에서 바로 확인
+
+빈 bag 을 들고 오는 것이 최악이다. **차를 치우기 전에** 확인한다.
+
+```bash
+ros2 bag info cone_MMDD_HHMM
+```
+
+- [ ] `/scan` 의 메시지 수가 0 이 아닌가 (10Hz × 녹화 초 정도면 정상)
+- [ ] `Duration` 이 의도한 길이인가
+- [ ] `Storage id: sqlite3` 인가
+
+### 9-4. 실측 재튜닝 (PC / 젯슨, ROS 불필요)
+
+```bash
+cd ~/xycar_ws/src/study/my_obstacle
+python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM
+python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM --plot    # 그림으로
+```
+
+출력에 **"스캔 N개 중 복도 유효 M개 (xx.x%)"** 가 나온다. 이 비율이 낮으면 그 아래
+안내대로 `--x-max` / `--bin-size` / `--half-width` 를 바꿔가며 다시 돌린다:
+
+```bash
+python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM --x-max 2.6 --bin-size 0.12
+```
+
+찾은 값을 `my_bringup/config/drive_params.yaml` 의 `obstacle_node.corridor` 에 반영한다.
+
+### 9-5. 이 bag 으로 확정해야 할 값
+
+지금 전부 **가정값**이라 실측이 필요한 것들:
+
+| 파라미터 | 지금 값 | 무엇으로 정하나 |
+|---|---|---|
+| `corridor.px_per_meter` | 300.0 | **가장 중요.** `(lane 픽셀 반폭 × 2) / 실측 트랙폭(m)`. 줄자 + perception 로그면 된다 |
+| `corridor.nominal_half_width_m` | 0.35 | 실측 콘 복도 폭의 절반 |
+| `corridor.x_max` | 2.2 | 라이다가 콘을 실제로 잡는 거리 |
+| `corridor.bin_size` | 0.15 | 실제 콘 간격에 맞춰 |
+| `fusion.cone_n_lo/hi` | 2 / 6 | 콘 구간에서 YOLO 가 실제로 몇 개를 세는지 |
+
+`px_per_meter` 가 틀리면 **라이다 복도와 카메라 차선의 단위가 안 맞아** 융합이 통째로
+어긋난다. 다른 어떤 튜닝보다 먼저 이것부터 맞출 것.
