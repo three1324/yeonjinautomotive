@@ -38,7 +38,7 @@ scp -r study/ <차량계정>@<차량IP>:~/xycar_ws/src/
 USB 로 옮긴다면 `study` 폴더를 `~/xycar_ws/src/study` 위치에 그대로 두면 된다.
 (서울대 대회 때 `race_*` 를 넣던 바로 그 자리다.)
 
-포함된 패키지 5개:
+포함된 패키지 6개:
 
 | 패키지 | 역할 | 이 차량에서 |
 |---|---|---|
@@ -47,6 +47,7 @@ USB 로 옮긴다면 `study` 폴더를 `~/xycar_ws/src/study` 위치에 그대�
 | **`my_driver`** | **주행 판단(FSM) + 횡·종방향 제어** | ✅ 사용 |
 | `my_bringup` | 통합 launch + 파라미터 | ✅ 사용 |
 | `my_slam` | SLAM 매핑/측위 | ⚠️ **동봉만. 기본 비활성** (§5 참고) |
+| `my_debug` | 파이프라인 시각화 뷰어 (`debug:=true` 일 때만) | ⚠️ 디버깅할 때만 켤 것 (§9 참고) |
 
 ---
 
@@ -73,7 +74,7 @@ CPU 를 잡는다 — 코드 수정 불필요.
 ```bash
 cd ~/xycar_ws
 colcon build --symlink-install --packages-select \
-    my_perception my_obstacle my_driver my_bringup my_slam
+    my_perception my_obstacle my_driver my_bringup my_slam my_debug
 source install/setup.bash
 ```
 
@@ -147,10 +148,10 @@ python3 my_bringup/tools/check_params.py
 | # | 항목 | 방법 | 안 하면 |
 |---|---|---|---|
 | 1 | 센서가 뜨는가 | `ros2 topic hz /image_raw` / `/scan` | 아무것도 안 됨 |
-| 2 | 추론 FPS | perception 로그 | CPU 추론이라 젯슨보다 느리다. 30fps 미달이면 `control_hz` 를 실제 FPS 에 맞출 것 |
+| 2 | 추론 FPS → `stale_timeout_sec` | perception 로그의 `X.Xfps` | CPU 추론이라 젯슨보다 느리고 들쭉날쭉하다. fps 주기가 `driver_node` 의 `stale_timeout_sec`(기본 0.5s)보다 길면 **매 프레임 "인지 끊김"으로 halt** — "가다 멈추고 가다 멈추고" 로 나타난다. 실측 fps 의 역수 × 2배 정도로 `amd_overrides.yaml` 의 `stale_timeout_sec` 를 맞출 것 (§9 시각화로 어느 프레임에서 걸리는지 바로 보임) |
 | 3 | `image_width` | `ros2 topic echo /image_raw --field width --once` | 640 이 아니면 조향이 한쪽으로 계통적으로 치우친다 |
 | 4 | `center_bias_px` | 트랙 중앙에 세워두고 perception 로그의 offset 을 읽어 그 값을 넣는다 | 목표 지점이 중앙이 아니게 됨 |
-| 5 | 조향 방향 | 손으로 밀며 `steer.invert` 확인 | 반대로 돌면 즉시 이탈 |
+| 5 | 조향 방향 | 손으로 밀며 `steer.invert` 확인 | [실측 2026-08-18] 이 차량은 반대로 나와 `amd_overrides.yaml` 에 이미 `invert: true` 로 넣어뒀다. 그래도 실차에서 다시 한번 확인할 것 — 원인(카메라 offset 부호 / 서보 링키지 / ROS1 벤더 xycar_motor.py 의 `-steer_val`)이 바뀌면 값도 바뀔 수 있다 |
 | 6 | 속도 체감 | `speed.base` 4.8 부터. 느리면 조금씩 올린다 | 12.0 은 이 차량에서 너무 빠르다 (§1) |
 | 7 | 조향 게인 | `drive_params.yaml` 의 §steer 주석에 절차가 있다 (k_lat → k_curve → k_damp 순) | 진동하거나 코너에서 밀린다 |
 
@@ -169,3 +170,39 @@ python3 my_bringup/tools/check_params.py
 | 차가 안 움직임 | `require_enable` 안전장치 | `/drive_enable` 발행 (§5) |
 | 차가 요동침 | `race_manager` 가 같이 떠 있다 | `ros2 node list` 로 확인 후 하나만 남길 것 |
 | `ModuleNotFoundError: ultralytics` | 도커에 미설치 | `pip install ultralytics` |
+| **차가 가다 멈추고 가다 멈추고** | `driver_node` 가 `stale_timeout_sec` 마다 "인지 끊김" 판정으로 halt 반복 (CPU 추론 FPS 가 느려서) | §7 #2. `amd_overrides.yaml` 의 `stale_timeout_sec` 를 실측 fps 에 맞춰 늘릴 것 |
+| `ros2 param set` 으로 `fsm.auto_start` 를 바꿨는데 그대로임 | `DriveFSM` 은 노드 시작 시 **한 번만** 만들어진다 — 런타임 파라미터 변경이 재생성 로직 없이는 반영 안 됨 | 그 파라미터를 **주면서 노드를 재시작**할 것: `ros2 run my_driver driver_node --ros-args --params-file ... -p fsm.auto_start:=true` |
+| 시각화 창(§9)에 `waiting for /debug_image` 만 뜸 | `perception_node` 를 `debug:=true` 없이 띄웠다 | `ros2 launch my_bringup drive_amd.launch.py debug:=true` 로 다시 띄울 것 |
+
+---
+
+## 9. 파이프라인 시각화 (디버깅용)
+
+```bash
+ros2 launch my_bringup drive_amd.launch.py debug:=true
+```
+
+한 창에 5단계를 같이 보여준다: **1) YOLO 원시 검출**(박스+클래스+conf) /
+**2) 차선 추정**(오프셋·품질·신호등·콘 개수) / **3) 판단(FSM) 상태** /
+**4) 횡방향 계획**(목표 오프셋, 기준 소스, OK/HOLD) / **5) 제어**(각도·속도·정지 사유).
+
+⚠️ **평소엔 반드시 `debug:=false`(기본값)로 둘 것.** `perception_node` 가 매
+프레임 두 장짜리 합성 이미지를 그려서 발행하는데, YOLO CPU 추론이 이미 이
+차량의 병목이다(§7 #2) — 디버그 이미지 그리기 비용까지 얹으면 FPS 가 더
+떨어져서 "가다 멈추고" 증상이 오히려 악화된다. **문제를 재현해서 관찰할 때만
+켜고, 원인을 찾으면 바로 끌 것.**
+
+내부적으로는 두 노드가 각자 이미 계산한 걸 보여주기만 한다 — 새 판단 로직이
+끼어들지 않는다:
+
+```
+perception_node --debug--> /debug_image (Image, publish_debug_image:=true 일 때만)
+driver_node     --------->  /debug_state (String, JSON, 항상 발행 — 비용이 거의 없다)
+                                   │
+                                   ▼
+                    my_debug/pipeline_view_node  (cv2.imshow 로 화면에 띄움)
+```
+
+`/debug_state` 는 driver_node 가 켜져 있으면 항상 나오므로, `debug:=true` 로
+띄운 뒤 `perception_node` 만 따로 재시작해도(디버그 이미지 없이) 텍스트
+패널만은 계속 갱신된다.

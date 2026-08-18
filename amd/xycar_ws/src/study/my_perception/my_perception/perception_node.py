@@ -9,11 +9,15 @@
     /lane    Float32MultiArray [offset_near, offset_far, valid, quality]
     /light   Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT (투표 확정값)
     /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y]
+    /debug_image Image         publish_debug_image=true 일 때만. YOLO 박스 + 차선 시각화
+                 (my_debug/pipeline_view_node 전용, 기본 off — CPU 추론 병목 때문)
 
 핵심 계산(lane/light_vote/detect)은 ROS 의존성이 없는 모듈로 분리돼 있고,
 tools/offline_check.py 가 같은 모듈을 써서 영상으로 검증한다.
 """
 
+import cv2
+import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
@@ -24,6 +28,14 @@ from std_msgs.msg import Float32MultiArray, Int32
 from my_perception.detect import extract
 from my_perception.lane import LaneEstimator
 from my_perception.light_vote import STATE_TO_NAME, LightVoter
+
+# 디버그 패널 박스 색상 (BGR). YOLO 결과 시각화용이라 여기서만 쓴다.
+_DEBUG_BOX_COLOR = {
+    "dashed_line": (200, 0, 200),
+    "solid_line": (0, 200, 200),
+    "traffic_cone": (0, 180, 0),
+}
+_DEBUG_BOX_DEFAULT = (0, 140, 255)
 
 
 class PerceptionNode(Node):
@@ -107,6 +119,13 @@ class PerceptionNode(Node):
         self.pub_light = self.create_publisher(Int32, "light", reliable_qos)
         self.pub_objects = self.create_publisher(Float32MultiArray, "objects", reliable_qos)
 
+        # publish_debug_image=true 일 때만 만든다 — YOLO 는 이미 이 노드의 병목이라
+        # (특히 CUDA 없는 AMD 차량, CPU 추론) 기본값에서는 그리기 비용을 아예 안 낸다.
+        self.publish_debug_image = self.get_parameter("publish_debug_image").value
+        self.pub_debug_image = None
+        if self.publish_debug_image:
+            self.pub_debug_image = self.create_publisher(Image, "debug_image", sensor_qos)
+
         self.create_subscription(
             Image, self.get_parameter("image_topic").value, self.on_image, sensor_qos
         )
@@ -115,6 +134,47 @@ class PerceptionNode(Node):
         self._log_period = self.get_parameter("log_period_sec").value
         self._last_log = self.get_clock().now()
         self.get_logger().info("perception_node 시작")
+
+    def _publish_debug_image(self, msg, frame, result, lane, state, det, width, height):
+        """디버그용 2분할 시각화: 1) YOLO 원시 검출  2) 차선 추정 결과.
+
+        driver_node 의 판단/제어 텍스트는 별개 노드(my_debug/pipeline_view_node)가
+        /debug_state 를 받아 이 이미지 아래에 합성한다 — 이 노드는 자기가 이미
+        계산해 둔 것만 그린다(판단 로직을 여기로 끌어오지 않는다).
+        """
+        panel_yolo = frame.copy()
+        if result.boxes is not None:
+            for box in result.boxes:
+                cls = self.names[int(box.cls)]
+                conf = float(box.conf)
+                x1, y1, x2, y2 = [int(v) for v in box.xyxy[0]]
+                color = _DEBUG_BOX_COLOR.get(cls, _DEBUG_BOX_DEFAULT)
+                cv2.rectangle(panel_yolo, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(panel_yolo, f"{cls} {conf:.2f}", (x1, max(0, y1 - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+        panel_lane = frame.copy()
+        y_near = self.get_parameter("lane.eval_near").value
+        y_far = self.get_parameter("lane.eval_far").value
+        cx = width // 2
+        cv2.line(panel_lane, (cx, 0), (cx, height), (255, 0, 0), 1)  # 화면 중심(기준선)
+        if lane.valid:
+            near_pt = (int(cx + lane.offset_near), int(y_near))
+            far_pt = (int(cx + lane.offset_far), int(y_far))
+            cv2.line(panel_lane, near_pt, far_pt, (0, 255, 0), 2)
+            cv2.circle(panel_lane, near_pt, 6, (0, 255, 0), -1)
+            cv2.circle(panel_lane, far_pt, 6, (0, 255, 255), -1)
+        cv2.putText(
+            panel_lane,
+            f"off={lane.offset_near:+.0f}/{lane.offset_far:+.0f} q={lane.quality:.2f} "
+            f"{'OK' if lane.valid else 'HOLD'} light={STATE_TO_NAME[state]} cone={det.cone_n}",
+            (10, height - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA,
+        )
+
+        combined = np.hstack([panel_yolo, panel_lane])
+        out = self.bridge.cv2_to_imgmsg(combined, "bgr8")
+        out.header = msg.header
+        self.pub_debug_image.publish(out)
 
     def _make_estimator(self, width, height):
         g = self.get_parameter
@@ -172,6 +232,9 @@ class PerceptionNode(Node):
             float(det.car_cx),
             float(det.car_bottom_y),
         ]))
+
+        if self.publish_debug_image:
+            self._publish_debug_image(msg, frame, result, lane, state, det, width, height)
 
         self._frames += 1
         now = self.get_clock().now()

@@ -22,6 +22,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -36,12 +37,15 @@ def generate_launch_description():
     use_sensors = LaunchConfiguration('sensors')
     use_motor = LaunchConfiguration('motor')
     use_slam = LaunchConfiguration('slam')
+    use_debug = LaunchConfiguration('debug')
 
     args = [
         DeclareLaunchArgument('params_file', default_value=default_params),
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('motor', default_value='true'),
         DeclareLaunchArgument('slam', default_value='false'),
+        # true 로 켜면 perception_node 가 /debug_image 를 내고 my_debug 뷰어 창이 뜬다.
+        DeclareLaunchArgument('debug', default_value='false'),
     ]
 
     # --- 센서 드라이버 ---
@@ -76,7 +80,10 @@ def generate_launch_description():
         executable='perception_node',
         name='perception_node',
         output='screen',
-        parameters=[params_file, {'model_path': default_model}],
+        parameters=[params_file, {
+            'model_path': default_model,
+            'publish_debug_image': ParameterValue(use_debug, value_type=bool),
+        }],
     )
     obstacle = Node(
         package='my_obstacle',
@@ -92,6 +99,13 @@ def generate_launch_description():
         output='screen',
         parameters=[params_file],
     )
+    pipeline_view = Node(
+        package='my_debug',
+        executable='pipeline_view_node',
+        name='pipeline_view_node',
+        output='screen',
+        condition=IfCondition(use_debug),
+    )
 
     return LaunchDescription(args + [cam, lidar, motor, slam,
-                                     perception, obstacle, driver])
+                                     perception, obstacle, driver, pipeline_view])

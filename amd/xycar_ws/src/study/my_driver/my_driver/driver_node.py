@@ -13,6 +13,7 @@
     /obstacle  Float32MultiArray [front_dist, left_free, right_free]
 발행:
     xycar_motor Float32MultiArray [angle, speed]
+    debug_state String            JSON. my_debug/pipeline_view_node 시각화 전용.
 
 제어 루프는 콜백이 아니라 **고정 주기 타이머**로 돈다. 센서마다 도착 주기가 달라서
 콜백 구동으로 짜면 제어 주기가 들쭉날쭉해지고 미분항(K_damp)이 불안정해진다.
@@ -23,12 +24,13 @@
     - 차선을 못 보면 조향을 서서히 중립으로 되돌리며 감속, 오래가면 정지
 """
 
+import json
 from dataclasses import dataclass
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import Bool, Float32MultiArray, Int32
+from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
 from my_driver.control import SpeedLimiter, SteeringController
 from my_driver.fsm import DriveFSM, State
@@ -207,6 +209,10 @@ class DriverNode(Node):
             depth=1,
         )
         self.pub_motor = self.create_publisher(Float32MultiArray, "xycar_motor", qos)
+        # my_debug/pipeline_view_node 가 이걸 받아 시각화 패널 하단에 텍스트로 합성한다.
+        # 문자열 JSON 하나로 끝내는 이유: 이 디버그 채널만을 위해 커스텀 .msg 를
+        # 새로 만들 정도의 가치가 없다 (디버그 전용, 프로토콜에 안 얹힘).
+        self.pub_debug = self.create_publisher(String, "debug_state", 10)
         self.create_subscription(Float32MultiArray, "lane", self.on_lane, qos)
         self.create_subscription(Float32MultiArray, "corridor", self.on_corridor, qos)
         self.create_subscription(Int32, "light", self.on_light, qos)
@@ -289,16 +295,19 @@ class DriverNode(Node):
 
         if not self._enabled:
             self._publish(0.0, 0.0)
+            self._pub_debug(self.fsm.state.value, 0.0, 0.0, "disabled")
             return
 
         # 인지가 끊겼으면 무조건 정지. 오래된 값으로 달리는 게 가장 위험하다.
         if self._last_lane_time is None:
             self._publish(0.0, 0.0)
+            self._pub_debug(self.fsm.state.value, 0.0, 0.0, "no_lane_yet")
             return
         age = (now - self._last_lane_time).nanoseconds / 1e9
         if age > self.stale_timeout:
             self.get_logger().warn(f"인지 데이터 끊김 ({age:.2f}s) — 정지", throttle_duration_sec=1.0)
             self._halt()
+            self._pub_debug(self.fsm.state.value, 0.0, 0.0, f"stale({age:.2f}s)")
             return
 
         state = self.fsm.update(self.obs.light, self.obs.lane_valid)
@@ -306,6 +315,7 @@ class DriverNode(Node):
         if not self.fsm.should_drive:
             self._publish(0.0, 0.0)
             self._log(state, 0.0, 0.0, "wait")
+            self._pub_debug(state.value, 0.0, 0.0, "wait")
             return
 
         # 차선(카메라)과 콘 복도(라이다)를 섞어 최종 횡방향 기준을 만든다.
@@ -343,6 +353,7 @@ class DriverNode(Node):
                     f"횡방향 기준 소실 {lost:.1f}s — 정지", throttle_duration_sec=1.0)
                 self._halt()
                 self._log(state, 0.0, 0.0, "ref lost")
+                self._pub_debug(state.value, 0.0, 0.0, "ref lost")
                 return
 
         target_offset = self.lateral.update(dt, self.obs, self.image_width)
@@ -361,6 +372,30 @@ class DriverNode(Node):
 
         self._publish(angle, speed)
         self._log(state, angle, speed, self.longitudinal.last_reason)
+        self._pub_debug(state.value, angle, speed, self.longitudinal.last_reason)
+
+    def _pub_debug(self, state_name, angle, speed, reason):
+        """my_debug/pipeline_view_node 용 실시간 상태 스냅샷. 매 tick 발행 —
+        문자열 하나 만드는 비용이라 30Hz 로 던져도 무시할 만하다."""
+        ref = self._ref
+        ov = self.lateral.overtake.phase.value if self.lateral.overtake.active else "-"
+        payload = {
+            "state": state_name,
+            "angle": round(float(angle), 1),
+            "speed": round(float(speed), 1),
+            "off_near": round(ref.offset_near, 1),
+            "off_far": round(ref.offset_far, 1),
+            "quality": round(ref.quality, 2),
+            "valid": bool(ref.valid),
+            "source": ref.source,
+            "corridor_weight": round(ref.corridor_weight, 2),
+            "light": LIGHT_NAME.get(self.obs.light, "?"),
+            "front_dist": round(self.obs.front_dist, 2),
+            "cone_n": self.obs.cone_n,
+            "overtake": ov,
+            "reason": reason,
+        }
+        self.pub_debug.publish(String(data=json.dumps(payload)))
 
     def _log(self, state, angle, speed, reason):
         now = self.get_clock().now()

@@ -75,6 +75,7 @@ E:\자율주행\auto\
 │   │   │   ├── my_driver/       판단(FSM)·제어
 │   │   │   │                    tools/sim_check.py (폐루프 시뮬)
 │   │   │   ├── my_slam/         매핑/측위 + waypoint 도구
+│   │   │   ├── my_debug/        파이프라인 시각화 뷰어 (drive*.launch.py debug:=true)
 │   │   │   ├── my_bringup/      ★ 통합 launch + config/drive_params.yaml
 │   │   │   │                    (모든 튜닝 파라미터가 여기 한 파일에)
 │   │   │   └── DEPLOY_AMD.md    ★ AMD 차량(서울대 대회)에 이 폴더째 복사하는 절차
