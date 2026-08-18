@@ -360,38 +360,52 @@ vesc_msgs  ackermann_msgs  geometry_msgs  nav_msgs  tf  message_generation/runti
 **rviz · gazebo · rqt · perception 은 하나도 안 쓴다.** `serial` 과
 `ackermann_msgs` 를 뺀 나머지는 전부 `ros-noetic-robot` 안에 있다.
 
-#### 어느 베이스를 쓸 것인가 — 선택
+#### ⭐ 베이스는 A안(desktop-full)으로 고정한다 — 더 이상 선택지 아님
+
+> **사용자 결정 (2026-08-18): "프로세서 차이로 생기는 것만 다르고 나머지는
+> 전부 원본과 똑같아야 한다."** 즉 **CPU 아키텍처 때문에 어쩔 수 없이 바뀌는
+> 것(바이너리가 arm64로 컴파일되는 것) 외에는 전부 원본과 동일해야 한다.**
+> B안(최소구성)은 패키지 구성이 원본과 달라지므로 **이제부터 쓰지 않는다.**
+> 아래 Dockerfile 한 가지로만 진행할 것 — 선택지가 아니다.
 
 **[확인] `osrf/ros:noetic-desktop-full` 은 arm64 멀티아키가 아니다(amd64 전용).**
-따라서 원본과 똑같이 가려면 `arm64v8/ros:noetic-ros-core` 위에
-`ros-noetic-desktop-full` 을 apt 로 직접 설치해야 한다.
+그래서 `arm64v8/ros:noetic-ros-core` 위에 `ros-noetic-desktop-full` 을 apt 로
+직접 설치해서 **패키지 구성을 원본(236개, §6 Step 1 분석 결과)과 맞춘다.**
+크기는 약 4.7GB, 빌드는 젯슨에서 30~60분 걸린다. `run_in_background` 로 걸고
+기다릴 것 — 시간이 오래 걸린다고 축소된 구성으로 바꾸지 말 것.
 
-| | **A. 원본 그대로 (desktop-full)** | **B. 최소 구성 (robot)** |
-|---|---|---|
-| 크기 | 약 4.7GB | 약 1.2GB |
-| 빌드 시간 | 젯슨에서 30~60분 | 5~10분 |
-| 모터 동작 | 동일 | **동일** (위 의존성 조사가 근거) |
-| 위험 | arm64 저장소에 desktop-full 이 없을 수 있음 | 미확인 의존성이 있으면 누락 |
+#### ⚠️ `motor` 는 반드시 alias 로만 만들 것 — 스크립트 파일 금지
 
-**권장 순서: A 를 먼저 시도하고, arm64 패키지가 없어 실패하면 B 로 폴백.**
-A 는 apt 설치라 무인으로 돌아가므로 `run_in_background` 로 걸어두고 다른 작업을
-병행할 것. B 로 가더라도 §7 검증을 통과하면 모터 제어 경로는 원본과 동일하다.
+Step 0(§5)에서 확정한 사실: 원본은 `/usr/local/bin/motor` 같은 **실행 파일이
+없다.** `/root/.bashrc:107` 의 **alias 하나**가 전부다:
+```
+alias motor='roslaunch xycar_motor xycar_motor.launch'
+```
+`/usr/local/bin/` 에는 pyserial 부산물(`pyserial-miniterm`, `pyserial-ports`)
+**뿐**이다. **`/usr/local/bin/motor` 라는 파일을 만들지 말 것.** 스크립트로
+만들면 동작은 비슷해도 원본과 다른 구현이 된다. 반드시 `.bashrc` 에 alias 로만
+추가하고, 원본처럼 `bash -ci`(대화형)로만 로드되게 할 것.
+
+**빌드 후 검증 (반드시 이 형태로 나와야 한다):**
+```bash
+docker run --rm osrf/ros:noetic-xycar bash -lc "type -a motor"
+# 기대 출력: motor is aliased to `roslaunch xycar_motor xycar_motor.launch'
+# 이렇게 나오면 잘못된 것: motor is /usr/local/bin/motor
+```
 
 #### Dockerfile
 
 `~/noetic-xycar/Dockerfile`:
 
 ```dockerfile
-# ── A안: 원본 그대로 (desktop-full) ──
 FROM arm64v8/ros:noetic-ros-core
+
+# 원본과 동일한 패키지 구성 (desktop-full). 시간이 걸려도 이대로 둘 것.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-noetic-desktop-full \
  && rm -rf /var/lib/apt/lists/*
 
-# ── B안: 최소 구성. A가 실패하면 위 두 블록을 지우고 아래 한 줄로 교체 ──
-# FROM arm64v8/ros:noetic-robot
-
-# ── 여기부터는 A/B 공통: 조직위 커스터마이징 재현 ──
+# 조직위 커스터마이징 재현 (§6 Step 1 분석 결과 그대로)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
       python3-pip \
@@ -403,7 +417,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 원본은 pyserial 3.5 (focal apt 는 3.4). pip 설치본이라 그대로 맞춘다.
 RUN pip3 install --no-cache-dir 'pyserial==3.5'
 
-# 원본 /root/.bashrc 의 alias 두 개 (line 103, 107) — motor 는 실행파일이 아니라 alias 다
+# 원본 /root/.bashrc 의 alias 두 개 그대로 (line 103, 107).
+# motor 는 alias 다 - /usr/local/bin/motor 같은 실행 파일을 만들지 말 것.
 RUN printf "\nalias cm='cd /root/noetic_ws && catkin_make'\nalias motor='roslaunch xycar_motor xycar_motor.launch'\n" \
       >> /root/.bashrc
 
@@ -430,6 +445,23 @@ docker build . -t osrf/ros:noetic-xycar --network host
 ```bash
 git clone https://github.com/wjwwood/serial.git      ~/noetic_ws/src/serial
 git clone https://github.com/ros-drivers/ackermann_msgs.git ~/noetic_ws/src/ackermann_msgs
+```
+
+#### 재빌드 전 기존 이미지/빌드 산출물 정리
+
+이전 시도(86개 패키지, `/usr/local/bin/motor` 스크립트 방식)가 이미 있다면
+지우고 새로 만들 것:
+
+```bash
+docker rmi osrf/ros:noetic-xycar
+rm -rf ~/noetic-xycar
+rm -rf ~/noetic_ws/devel ~/noetic_ws/build     # 새 이미지로 다시 catkin_make 해야 함
+```
+
+**패키지 개수로 검증 — 236개에 근접해야 한다:**
+```bash
+docker run --rm osrf/ros:noetic-xycar bash -lc "dpkg -l | grep -c '^ii  ros-noetic'"
+# 기대: 236 근처 (desktop-full 전체). 86 처럼 적게 나오면 잘못된 것.
 ```
 
 ### Step 2 — 컨테이너 안에서 ROS1 워크스페이스 빌드
