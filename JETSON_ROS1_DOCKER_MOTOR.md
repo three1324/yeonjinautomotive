@@ -217,14 +217,16 @@ ROS2 (호스트, 네이티브)                      ROS1 (컨테이너 안)
 
 **핵심**: VESC 드라이버 자체가 컨테이너 안에 있다. ROS2 쪽은 토픽 하나만 던진다.
 
-### 컨테이너 안의 `motor` 명령
-
-원본 이미지에 있던 명령이라 zip에는 없다. 내용은 `xycar_motor.launch` 실행이 전부다:
+### 컨테이너 안의 `motor` — 실행 파일이 아니라 **alias** 다 (Step 0 에서 확정)
 
 ```bash
-#!/bin/bash
-roslaunch xycar_motor xycar_motor.launch
+# 원본 컨테이너의 /root/.bashrc 107번째 줄
+alias motor='roslaunch xycar_motor xycar_motor.launch'
 ```
+
+`/usr/local/bin/motor` 같은 실행 파일은 **존재하지 않는다.** 그래서 원본
+`motor` 스크립트가 컨테이너를 `bash -ci`(**대화형**)로 띄우는 것이다 —
+alias 는 대화형 셸에서만 로드된다. `-i` 를 빼면 `motor: command not found` 가 난다.
 
 `xycar_motor.launch` 는 `motor_type:=0`(VESC) 기본값으로
 `vesc_drive_xycar_motor.launch`(vesc_driver + ackermann_to_vesc)와
@@ -244,6 +246,10 @@ roslaunch xycar_motor xycar_motor.launch
 >
 > **AMD 차량(원본 PC)에 접근할 수 있다면 이 단계를 먼저 할 것.**
 > "추정 재현"이 "정확 재현"으로 바뀐다.
+>
+> ### ✅ 이 단계는 2026-08-18 에 이미 완료됐다.
+> 분석 결과가 **§6 Step 1** 에 전부 반영돼 있다. 아래 절차는 재확인이
+> 필요할 때만 쓰면 된다. **바로 Step 1 로 갈 것.**
 
 **AMD 차량에서:**
 ```bash
@@ -301,45 +307,129 @@ Step 1의 Dockerfile로 진행하되, **이건 추정 재현이라는 점을 사
 
 ### Step 1 — ROS1 noetic arm64 이미지 만들기
 
-공식 `ros:noetic-ros-base` 는 멀티아키텍처라 arm64를 지원한다
-(`arm64v8/ros:noetic` 도 가능). 여기에 필요한 패키지를 얹어
-`osrf/ros:noetic-xycar` 태그로 만든다 — **태그명을 원본과 똑같이 맞추면
-`motor` 스크립트를 거의 수정 없이 쓸 수 있다.**
+> ✅ **Step 0 완료 (2026-08-18).** 아래 내용은 원본 이미지를 실제로 분석해서
+> 확정한 것이다. 추정이 아니다.
+
+#### 원본 이미지 분석 결과 (확정)
+
+**베이스 체인** (`docker history` 아래→위):
+```
+ubuntu:20.04 (focal)
+ → tzdata, ca-certificates/curl/dirmngr/gnupg2
+ → apt 저장소: snapshots.ros.org/noetic/final/ubuntu focal main   ← packages.ros.org 아님
+ → ros-noetic-ros-core=1.5.0-1*
+ → ros_entrypoint.sh + ENTRYPOINT + CMD ["bash"]
+ → build-essential, python3-rosdep, python3-rosinstall, python3-vcstools
+ → rosdep init && rosdep update
+ → ros-noetic-ros-base → ros-noetic-robot → ros-noetic-desktop
+ → ros-noetic-desktop-full=1.5.0-1*        ← 여기까지가 공식 osrf/ros:noetic-desktop-full
+ → [bash 레이어 14개, 약 172MB]            ← 조직위 커스터마이징
+```
+
+⚠️ **커스터마이징은 `docker commit` 으로 됐다.** 상위 14개 레이어의 `CREATED BY`
+가 전부 `bash` 라서 **어떤 명령을 실행했는지 이력으로는 볼 수 없다.** 대신
+`dpkg -l` / `pip3 list` / 파일 확인으로 역추적한 결과가 아래다.
+
+**커스터마이징 내용 (역추적 확정):**
+
+| 항목 | 확인 방법 | 값 |
+|---|---|---|
+| `ros-noetic-serial` | `dpkg -l` | `1.2.1-1focal.20250426.010535` |
+| `ros-noetic-ackermann-msgs` | `dpkg -l` | `1.0.2-1focal.20250426.013235` |
+| `pyserial` | `pip3 list` | **3.5** (focal apt 는 3.4 → pip 설치본) |
+| `/usr/local/bin/` | `ls` | `pyserial-miniterm`, `pyserial-ports` (pyserial 부산물뿐) |
+| **`motor` 의 정체** | `/root/.bashrc:107` | **`alias motor='roslaunch xycar_motor xycar_motor.launch'`** |
+| `cm` alias | `/root/.bashrc:103` | `alias cm='cd /root/noetic_ws && catkin_make'` |
+| `ENV DISPLAY` | `docker inspect` | `:0` |
+| `/root` 하위 | `ls -la` | `noetic_ws/`(마운트 지점), `Downloads/`(마운트 지점), `tmp_ws/`(잔재) |
+
+> 📌 **`motor` 는 실행 파일이 아니라 alias 다.** 그래서 원본 `motor` 스크립트가
+> `bash -ci`(**대화형**)로 컨테이너를 띄운다 — alias 는 대화형 셸에서만 읽힌다.
+> `bash -c`(비대화형)로 바꾸면 `motor: command not found` 가 난다. **절대 바꾸지 말 것.**
+>
+> zip 안의 `noetic_ws/src/.bashrc`(3328B)에는 이 alias 가 **없다**. 컨테이너
+> 것(3451B)이 더 최신이라 아래 Dockerfile 에서 직접 추가한다.
+
+#### 벤더 패키지가 실제로 요구하는 의존성 (package.xml 전수 조사)
+
+```
+nodelet  pluginlib  roscpp  rospy  serial  std_msgs
+vesc_msgs  ackermann_msgs  geometry_msgs  nav_msgs  tf  message_generation/runtime
+```
+
+**rviz · gazebo · rqt · perception 은 하나도 안 쓴다.** `serial` 과
+`ackermann_msgs` 를 뺀 나머지는 전부 `ros-noetic-robot` 안에 있다.
+
+#### 어느 베이스를 쓸 것인가 — 선택
+
+**[확인] `osrf/ros:noetic-desktop-full` 은 arm64 멀티아키가 아니다(amd64 전용).**
+따라서 원본과 똑같이 가려면 `arm64v8/ros:noetic-ros-core` 위에
+`ros-noetic-desktop-full` 을 apt 로 직접 설치해야 한다.
+
+| | **A. 원본 그대로 (desktop-full)** | **B. 최소 구성 (robot)** |
+|---|---|---|
+| 크기 | 약 4.7GB | 약 1.2GB |
+| 빌드 시간 | 젯슨에서 30~60분 | 5~10분 |
+| 모터 동작 | 동일 | **동일** (위 의존성 조사가 근거) |
+| 위험 | arm64 저장소에 desktop-full 이 없을 수 있음 | 미확인 의존성이 있으면 누락 |
+
+**권장 순서: A 를 먼저 시도하고, arm64 패키지가 없어 실패하면 B 로 폴백.**
+A 는 apt 설치라 무인으로 돌아가므로 `run_in_background` 로 걸어두고 다른 작업을
+병행할 것. B 로 가더라도 §7 검증을 통과하면 모터 제어 경로는 원본과 동일하다.
+
+#### Dockerfile
 
 `~/noetic-xycar/Dockerfile`:
 
 ```dockerfile
-FROM ros:noetic-ros-base
-
-# ROS1 vesc / xycar_motor 가 요구하는 것들
+# ── A안: 원본 그대로 (desktop-full) ──
+FROM arm64v8/ros:noetic-ros-core
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-pip \
-      python3-serial \
-      ros-noetic-ackermann-msgs \
-      ros-noetic-serial \
-      ros-noetic-tf \
-      ros-noetic-topic-tools \
-      ros-noetic-nodelet \
-      build-essential \
+      ros-noetic-desktop-full \
  && rm -rf /var/lib/apt/lists/*
 
-# 원본 이미지에 있던 motor 명령 재현
-RUN printf '#!/bin/bash\nroslaunch xycar_motor xycar_motor.launch "$@"\n' \
-      > /usr/local/bin/motor && chmod +x /usr/local/bin/motor
+# ── B안: 최소 구성. A가 실패하면 위 두 블록을 지우고 아래 한 줄로 교체 ──
+# FROM arm64v8/ros:noetic-robot
 
-ENV ROS_MASTER_URI=http://localhost:11311
+# ── 여기부터는 A/B 공통: 조직위 커스터마이징 재현 ──
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      python3-pip \
+      python3-rosdep python3-rosinstall python3-vcstools \
+      ros-noetic-serial \
+      ros-noetic-ackermann-msgs \
+ && rm -rf /var/lib/apt/lists/*
+
+# 원본은 pyserial 3.5 (focal apt 는 3.4). pip 설치본이라 그대로 맞춘다.
+RUN pip3 install --no-cache-dir 'pyserial==3.5'
+
+# 원본 /root/.bashrc 의 alias 두 개 (line 103, 107) — motor 는 실행파일이 아니라 alias 다
+RUN printf "\nalias cm='cd /root/noetic_ws && catkin_make'\nalias motor='roslaunch xycar_motor xycar_motor.launch'\n" \
+      >> /root/.bashrc
+
+# 런타임 마운트 지점
+RUN mkdir -p /root/noetic_ws /root/Downloads
+
+ENV DISPLAY=:0
 ```
 
 ```bash
-cd ~/noetic-xycar
+mkdir -p ~/noetic-xycar && cd ~/noetic-xycar
+# (위 Dockerfile 작성 후)
 docker build . -t osrf/ros:noetic-xycar --network host
 ```
 
-**[확인]** `ros-noetic-serial` 패키지가 arm64 저장소에 없을 수 있다. 빌드가
-그 줄에서 실패하면 해당 줄을 빼고 다시 시도한 뒤, `catkin_make`(Step 2)에서
-`serial` 관련 에러가 나면 그때 소스로 빌드할 것:
+**태그를 원본과 똑같이 `osrf/ros:noetic-xycar` 로 둘 것** — `motor` 스크립트가
+이 이름을 참조하므로 스크립트 수정이 줄어든다.
+
+**[확인] `rosdep init` 은 이미 베이스 이미지에 되어 있다** (history 참고).
+다시 실행하면 에러가 나므로 넣지 말 것.
+
+**[확인]** `ros-noetic-serial` / `ros-noetic-ackermann-msgs` 가 arm64 에 없으면
+소스 빌드로 대체:
 ```bash
-git clone https://github.com/wjwwood/serial.git /root/noetic_ws/src/serial
+git clone https://github.com/wjwwood/serial.git      ~/noetic_ws/src/serial
+git clone https://github.com/ros-drivers/ackermann_msgs.git ~/noetic_ws/src/ackermann_msgs
 ```
 
 ### Step 2 — 컨테이너 안에서 ROS1 워크스페이스 빌드
@@ -527,7 +617,7 @@ ROS2 `xycar_motor` 를 구독 → `docker exec ... rostopic pub` 으로 전달.
 
 | 날짜 | 단계 | 결과 | 비고 |
 |---|---|---|---|
-| | **Step 0 원본 이미지 확보** | | 성공/불가: ___ · 누락 패키지: ___ |
+| 2026-08-18 | **Step 0 원본 이미지 확보** | ✅ **완료** | 베이스=desktop-full · 커스텀=serial/ackermann_msgs/pyserial3.5/bashrc alias · motor는 alias (§6 Step 1 참고) |
 | | Step 1 이미지 빌드 | | |
 | | Step 2 catkin_make | | |
 | | Step 3 ros1_bridge | | |
