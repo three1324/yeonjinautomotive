@@ -69,6 +69,8 @@ def _section(title):
     print(f"\n=== {title} " + "=" * max(0, 62 - len(title)))
 
 
+EXPECTED_DOMAIN_ID = "47"   # 다른 팀과 겹쳐서 2026-08-19 에 분리
+
 # --------------------------------------------------------------------- 1. 환경
 
 def check_env():
@@ -82,11 +84,14 @@ def check_env():
               "source /opt/ros/humble/setup.bash")
 
     domain = os.environ.get("ROS_DOMAIN_ID", "")
-    if domain:
-        _mark("WARN", "ROS_DOMAIN_ID", f"={domain}",
-              "차량과 노트북이 서로 안 보이면 양쪽 값이 같은지 확인할 것")
+    if domain == EXPECTED_DOMAIN_ID:
+        _mark("PASS", "ROS_DOMAIN_ID", f"={domain}")
+    elif domain:
+        _mark("FAIL", "ROS_DOMAIN_ID", f"={domain} (우리 팀 값은 {EXPECTED_DOMAIN_ID})",
+              f"export ROS_DOMAIN_ID={EXPECTED_DOMAIN_ID} && ros2 daemon stop")
     else:
-        _mark("PASS", "ROS_DOMAIN_ID", "미설정(기본 0)")
+        _mark("FAIL", "ROS_DOMAIN_ID", "미설정(기본 0) — 다른 팀과 겹친다",
+              f"export ROS_DOMAIN_ID={EXPECTED_DOMAIN_ID} && ros2 daemon stop")
 
     install = os.path.join(WS, "install")
     if not os.path.isdir(install):

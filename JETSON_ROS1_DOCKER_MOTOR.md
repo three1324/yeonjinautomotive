@@ -598,6 +598,20 @@ docker exec ros1_container bash -ci "source /opt/ros/noetic/setup.bash; rostopic
 우리 ROS2 주행 노드가 **같은 DOMAIN_ID** 여야 서로 보인다. 하나로 통일하고
 기록할 것.
 
+**확정값: `ROS_DOMAIN_ID=47`** (2026-08-19). 기본값 0 을 쓰다가 같은 네트워크의
+다른 팀 노드가 섞여 들어와서 분리했다. 설정 위치:
+
+| 위치 | 내용 |
+|---|---|
+| `~/.bashrc` (젯슨) | `export ROS_DOMAIN_ID=47` — humble setup.bash source 직전 |
+| `~/xycar_ws/etc/motor_vesc/motor` | 스크립트 상단 + 브릿지 실행 직전 두 곳에 명시 |
+| 노트북(원격 rviz/토픽 확인용) | 같은 값을 `~/.bashrc` 에 넣어야 서로 보인다 |
+
+컨테이너 안 ROS1 은 도메인 개념이 없다(`ROS_MASTER_URI` 로 붙으므로 무관).
+
+바꾼 뒤에는 **반드시 `ros2 daemon stop`** — CLI 데몬이 옛 도메인 그래프를
+캐시하고 있어서 `ros2 topic list` 가 거짓말을 한다.
+
 ### (3) 우리 ROS2 모터 패키지와 동시 실행 금지
 
 젯슨에는 우리가 포팅한 ROS2판 `xycar_motor` / `vesc` 패키지도 빌드돼 있다
@@ -683,3 +697,4 @@ ROS2 `xycar_motor` 를 구독 → `docker exec ... rostopic pub` 으로 전달.
 | 2026-08-18 | 검증 #3 VESC 전압 | ✅ 정상 확인 | 배터리 정상 연결 상태로 확인됨(구체 수치는 기록하지 않음) |
 | 2026-08-18 | 검증 #5 토픽 이름 | ✅ 완료 | 택한 방식: **ros1_bridge remap 사용** (§8-(1) 네임스페이스 불일치를 remap으로 해결) |
 | 2026-08-18 | ROS_DOMAIN_ID | ✅ 확정 | **기본값(0)** 사용, 브릿지와 ROS2 주행 노드 모두 동일 |
+| 2026-08-19 | ROS_DOMAIN_ID 변경 | ✅ 확정 | 다른 팀과 도메인 0 이 겹쳐 토픽이 섞임 → **47** 로 분리. `~/.bashrc` · `motor` 스크립트 · `preflight.py` 반영. 팀원 노트북도 47 로 맞출 것 |
