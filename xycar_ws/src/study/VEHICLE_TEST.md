@@ -241,13 +241,49 @@ ros2 topic hz   /scan --qos-reliability best_effort
 `obstacle_node` 와 `viz_node` 는 BEST_EFFORT 로 구독하므로 정상 동작한다. RViz 는
 Display 의 Reliability Policy 를 Best Effort 로 두면 된다(`drive.rviz` 는 이미 그렇다).
 
-### 참고 — launch 파일의 불일치 (지금은 무해)
+### 증상 3 — `ros2 topic list` 에 `/scan` 이 없는데 실제로는 발행 중 (2026-08-19)
 
-`xycar_lidar.launch.py` 는 노드를 `LifecycleNode` 액션으로 띄우지만, 실제
+**가장 헷갈리는 실패다. 라이다는 멀쩡하다.** 실측:
+
+```
+$ ros2 topic list | grep scan          # ← 아무것도 안 나옴
+$ ros2 topic hz /scan
+average rate: 9.656                    # ← 정상 발행 중
+```
+
+`ros2 topic list` / `ros2 node list` 는 **ros2 daemon** 의 캐시를 읽는다. 데몬이
+옛 세션의 참가자 정보를 붙들고 있으면 지금 떠 있는 토픽이 목록에서 빠진다.
+이때 콘솔에 이 줄이 도배된다:
+
+```
+sequence size exceeds remaining buffer
+```
+
+이건 라이다 에러가 **아니다** — rmw_fastrtps 가 깨진 discovery 데이터를 읽는 것이다.
+조치:
+
+```bash
+ros2 daemon stop && ros2 daemon start
+```
+
+> 판정은 항상 `ros2 topic hz` 로 한다. `topic list` 에 없다고 죽었다고 보면 안 된다.
+
+### launch 파일의 LifecycleNode 불일치 — 고침 (2026-08-19)
+
+`xycar_lidar.launch.py` 는 노드를 `LifecycleNode` 액션으로 띄웠지만, 실제
 `xycar_lidar_node.cpp` 는 평범한 `rclcpp::Node` 다(라이프사이클 서비스가 없다).
-전이를 아무것도 emit 하지 않으므로 프로세스는 그냥 일반 노드로 뜨고 동작에는
-문제가 없다. 다만 나중에 `ros2 lifecycle` 로 제어하려 하면 안 먹는다.
-**벤더 패키지라 지금은 건드리지 않았다.**
+전이가 영영 안 오니 `ros2 lifecycle get` 이 실패하고, 그게 "라이다가 안 켜졌다"는
+오해로 이어졌다. 일반 `Node` 액션으로 바꿨다.
+
+동작 확인 (2026-08-19, 실차):
+
+```
+Lidar successfully connected [/dev/ttyLIDAR:512000]   Model: G2B
+Now lidar is scanning...                              (기동 ~2.5초 소요)
+/scan  9.66 Hz    ->  /obstacle  front 0.70m / left 0.29m / right 0.35m
+```
+
+> 기동에 2.5초가 걸린다. launch 직후 바로 `hz` 를 재면 안 나온다 — 5초는 기다릴 것.
 
 
 ---
