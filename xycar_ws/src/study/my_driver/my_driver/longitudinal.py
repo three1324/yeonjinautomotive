@@ -7,6 +7,8 @@ ROS 의존성 없음.
 
     v = base * f_curve * f_quality * f_cone * f_overtake   (감속 요인은 곱)
     v = min(v, f_obstacle(front_dist))                     (장애물은 상한)
+                                                           ↑ 라바콘 구간에서만
+                                                             (obstacle_cap_in_cone_only)
 
 f1tenth pure_pursuit 도 같은 발상으로 조향각에 비례해 감속한다
 (speed = max - (max-min) * |angle|/steer_max).
@@ -37,6 +39,7 @@ class LongitudinalPlanner:
         cone_n_lo, cone_n_hi, cone_factor_min,
         stop_dist, slow_dist,
         overtake_factor=0.7,
+        obstacle_cap_in_cone_only=True,
     ):
         self.base_speed = base_speed
         self.min_speed = min_speed
@@ -61,9 +64,18 @@ class LongitudinalPlanner:
         # 가속한다.** 기동 중에는 명시적으로 눌러둔다.
         self.overtake_factor = overtake_factor
 
-        # 장애물 거리 상한
+        # 장애물 거리 상한 (라이다)
         self.stop_dist = stop_dist    # 이 거리 이하면 정지
         self.slow_dist = slow_dist    # 이 거리부터 감속 시작
+        # 라이다 상한을 **라바콘 구간에서만** 적용할지 (2026-08-19 결정).
+        # 왜: 라이다는 트랙 밖 벽·기둥·관중과 실제 장애물을 구분하지 못한다.
+        # 상시 적용하면 곡선에서 벽이 섹터에 들어올 때마다 STOP 이 걸려
+        # "가다 서다"가 된다. 콘 구간은 통로가 좁아 섹터 안이 실제 콘 벽이므로
+        # 이 상한이 의미가 있다.
+        # ⚠️ True 로 두면 콘 구간 밖에서는 **전방 비상정지가 없다.** 방해차량은
+        #    카메라 회피(lateral.py)가 담당한다는 전제다. 카메라가 못 본 장애물은
+        #    아무도 막지 않으므로, 그게 문제가 되면 False 로 되돌릴 것.
+        self.obstacle_cap_in_cone_only = obstacle_cap_in_cone_only
 
         self.last_reason = ""
 
@@ -76,8 +88,12 @@ class LongitudinalPlanner:
         return None
 
     def update(self, lane_valid, offset_near, offset_far, quality,
-               cone_n, front_dist, overtake_active=False):
-        """목표 속도를 반환한다 (xycar_motor 의 speed 단위)."""
+               cone_n, front_dist, overtake_active=False, cone_zone=False):
+        """목표 속도를 반환한다 (xycar_motor 의 speed 단위).
+
+        cone_zone: 지금이 라바콘 구간인가. obstacle_cap_in_cone_only=True 면
+                   이 값이 False 일 때 라이다 전방거리(front_dist)를 무시한다.
+        """
         v = self.base_speed
         reasons = []
 
@@ -109,16 +125,19 @@ class LongitudinalPlanner:
             v *= self.overtake_factor
             reasons.append("overtake")
 
-        # 5) 장애물 상한 — 곱이 아니라 상한. 앞이 막히면 다른 요인과 무관하게 느려야 한다
-        if front_dist <= self.stop_dist:
-            v = 0.0
-            reasons.append(f"STOP({front_dist:.2f}m)")
-        elif front_dist < self.slow_dist:
-            cap = _lerp_factor(front_dist, self.stop_dist, self.slow_dist,
-                               self.min_speed, self.base_speed)
-            if cap < v:
-                v = cap
-                reasons.append(f"obstacle({front_dist:.2f}m)")
+        # 5) 장애물 상한 (라이다) — 곱이 아니라 상한. 앞이 막히면 다른 요인과
+        #    무관하게 느려야 한다. 단, 라바콘 구간 밖에서는 건너뛴다(위 주석 참고).
+        use_obstacle = cone_zone or not self.obstacle_cap_in_cone_only
+        if use_obstacle:
+            if front_dist <= self.stop_dist:
+                v = 0.0
+                reasons.append(f"STOP({front_dist:.2f}m)")
+            elif front_dist < self.slow_dist:
+                cap = _lerp_factor(front_dist, self.stop_dist, self.slow_dist,
+                                   self.min_speed, self.base_speed)
+                if cap < v:
+                    v = cap
+                    reasons.append(f"obstacle({front_dist:.2f}m)")
 
         if v > 0.0:
             v = max(v, self.min_speed)

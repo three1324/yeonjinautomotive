@@ -35,10 +35,11 @@ front_dist 기본값이 99.0m(=전방 개활)이라 장애물 로직은 그냥 �
                     image_width 와 맞춰야 조향 중심이 안 틀어진다)
     rviz            RViz2 도 띄울지 (기본 true)
     auto_start      신호등 없이 바로 LANE_DRIVE 로 시작할지 (기본 true)
-    lidar_confirm   회피 트리거에 라이다 교차확인을 요구할지 (기본 false)
-                    라이다가 없으면 front_dist=99.0 이라 true 로는 절대 발동하지
-                    않는다. 영상만으로 회피를 보려고 여기서만 끈다 — 실차는 true.
     enable          /drive_enable 을 자동으로 켤지 (기본 false)
+
+    (2026-08-19: lidar_confirm 인자는 없어졌다. 회피가 카메라 전용이 되어
+     라이다 없는 replay 에서도 실차와 **같은 경로**로 돌아간다 — 예전에는
+     이 인자로 트리거 조건을 바꿔야 해서 replay 와 실차 동작이 달랐다.)
 
 ⚠️ **화면에 angle=0 speed=0 만 나온다면 십중팔구 이 둘 중 하나다.**
 
@@ -101,8 +102,6 @@ def generate_launch_description():
         # 재생 테스트용 영상에는 보통 신호등이 없어서, false 면 WAIT_LIGHT 에서 멈춘 채
         # 아무것도 안 보인다(그게 "왜 안 움직이지?"의 1번 원인).
         DeclareLaunchArgument('auto_start', default_value='true'),
-        # 위와 같은 이유로 여기서만 false 다. 실차 launch 는 건드리지 않는다.
-        DeclareLaunchArgument('lidar_confirm', default_value='false'),
         DeclareLaunchArgument('enable', default_value='false'),
     ]
 
@@ -143,11 +142,9 @@ def generate_launch_description():
         parameters=common_params + [{
             'fsm.auto_start': ParameterValue(
                 LaunchConfiguration('auto_start'), value_type=bool),
-            # 라이다가 없으니 front_dist 는 항상 99.0(=개활)이라 회피 트리거의
-            # 라이다 교차확인 조건이 절대 만족되지 않는다. 영상만으로 회피 로직을
-            # 시험하려면 그 조건을 꺼야 한다. **replay 전용 — 실차는 true 유지.**
-            'lateral.require_lidar_confirm': ParameterValue(
-                LaunchConfiguration('lidar_confirm'), value_type=bool),
+            # [2026-08-19] 회피가 카메라 전용이 되면서 lateral.require_lidar_confirm
+            # 파라미터 자체가 없어졌다. 영상만 있는 replay 에서도 회피 로직이
+            # 그대로 돌아가므로 여기서 덮어쓸 것이 없다.
         }],
     )
 

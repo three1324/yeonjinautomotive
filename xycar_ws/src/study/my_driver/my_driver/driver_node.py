@@ -22,6 +22,20 @@
     - 시작 시 /drive_enable 을 받기 전까지 speed 0 을 계속 발행한다 (f1tenth 방식)
     - 인지 데이터가 끊기면(stale) 정지한다
     - 차선을 못 보면 조향을 서서히 중립으로 되돌리며 감속, 오래가면 정지
+
+────────────────────────────────────────────────────────────────────────
+센서 역할 분리 (2026-08-19 실차 결정)
+
+    카메라  차선 추종 · 신호등 · **방해차량 회피** · 라바콘 구간 진입 판정
+    라이다  **라바콘 구간에서만** — 콘 복도 중앙(/corridor) + 전방 장애물 상한
+
+라이다는 트랙 밖 벽·기둥·관중과 실제 장애물을 구분하지 못한다. 상시
+사용하면 곡선에서 벽이 섹터에 들어올 때마다 정지가 걸리고, 차선을 잠깐
+놓칠 때마다 엉뚱한 것을 주행 기준으로 삼는다. 콘 구간은 통로가 좁아
+섹터 안이 곧 콘 벽이므로 그 구간에서만 신뢰한다.
+
+구간 판정은 cone_zone.ConeZoneDetector 한 곳에서만 하고, 그 결과를
+fusion / longitudinal 두 소비처가 공유한다 (켜지는 시점이 어긋나지 않게).
 """
 
 import json
@@ -32,6 +46,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
+from my_driver.cone_zone import ConeZoneDetector
 from my_driver.control import SpeedLimiter, SteeringController
 from my_driver.fsm import DriveFSM, State
 from my_driver.fusion import FusedResult, LateralFusion, LateralRef
@@ -94,25 +109,26 @@ class DriverNode(Node):
                 ("fsm.start_confirm_frames", 5),
                 ("fsm.enable_shortcut", False),
                 ("fsm.auto_start", False),
-                # 차선 <-> 복도 융합
+                # 라바콘 구간 판정 — 라이다를 쓸 구간을 여기서 정한다 (cone_zone.py)
+                ("cone_zone.enter_n", 3),
+                ("cone_zone.exit_n", 1),
+                ("cone_zone.exit_hold_sec", 1.5),
+                # 차선 <-> 복도 융합 (라바콘 구간에서만 동작)
                 ("fusion.cone_n_lo", 2.0),
                 ("fusion.cone_n_hi", 6.0),
                 ("fusion.max_corridor_weight", 0.9),
                 ("fusion.weight_rate_per_sec", 1.5),
                 ("fusion.min_corridor_quality", 0.4),
-                # 횡방향
+                # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.shift_px", 120.0),
                 ("lateral.trigger_bottom_y", 300.0),
-                ("lateral.trigger_front_dist", 1.5),
-                ("lateral.side_clearance", 0.6),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
                 ("lateral.cooldown_sec", 1.0),
                 ("lateral.pass_exit_ratio", 0.85),
                 ("lateral.pass_exit_cx_ratio", 0.85),
-                ("lateral.require_lidar_confirm", True),
                 # 종방향
                 ("speed.base", 12.0),
                 ("speed.min", 4.0),
@@ -130,6 +146,7 @@ class DriverNode(Node):
                 ("speed.stop_dist", 0.35),
                 ("speed.slow_dist", 1.2),
                 ("speed.overtake_factor", 0.7),
+                ("speed.obstacle_cap_in_cone_only", True),
                 # 조향
                 ("steer.k_lat", 0.10),
                 ("steer.k_curve", 0.06),
@@ -153,6 +170,12 @@ class DriverNode(Node):
             enable_shortcut=g("fsm.enable_shortcut").value,
             auto_start=g("fsm.auto_start").value,
         )
+        # 라이다를 쓸 구간(라바콘)을 정하는 유일한 판정자. 카메라 콘 개수로 판단한다.
+        self.cone_zone = ConeZoneDetector(
+            enter_n=g("cone_zone.enter_n").value,
+            exit_n=g("cone_zone.exit_n").value,
+            exit_hold_sec=g("cone_zone.exit_hold_sec").value,
+        )
         self.fusion = LateralFusion(
             cone_n_lo=g("fusion.cone_n_lo").value,
             cone_n_hi=g("fusion.cone_n_hi").value,
@@ -164,15 +187,12 @@ class DriverNode(Node):
             OvertakeBehavior(
                 shift_px=g("lateral.shift_px").value,
                 trigger_bottom_y=g("lateral.trigger_bottom_y").value,
-                trigger_front_dist=g("lateral.trigger_front_dist").value,
-                side_clearance=g("lateral.side_clearance").value,
                 shift_sec=g("lateral.shift_sec").value,
                 pass_sec=g("lateral.pass_sec").value,
                 return_sec=g("lateral.return_sec").value,
                 cooldown_sec=g("lateral.cooldown_sec").value,
                 pass_exit_ratio=g("lateral.pass_exit_ratio").value,
                 pass_exit_cx_ratio=g("lateral.pass_exit_cx_ratio").value,
-                require_lidar_confirm=g("lateral.require_lidar_confirm").value,
             ),
             enable_overtake=g("lateral.enable_overtake").value,
         )
@@ -190,6 +210,7 @@ class DriverNode(Node):
             stop_dist=g("speed.stop_dist").value,
             slow_dist=g("speed.slow_dist").value,
             overtake_factor=g("speed.overtake_factor").value,
+            obstacle_cap_in_cone_only=g("speed.obstacle_cap_in_cone_only").value,
         )
         self.steering = SteeringController(
             k_lat=g("steer.k_lat").value,
@@ -338,6 +359,12 @@ class DriverNode(Node):
             self._pub_debug(state.value, 0.0, 0.0, "wait")
             return
 
+        # ── 라이다를 쓸 구간인가 (2026-08-19 결정: 라바콘 구간에서만) ──
+        # 판정은 **카메라** 콘 개수로 한다. 라이다를 언제 쓸지를 라이다로 정하면
+        # 순환이기 때문이다. 아래 두 소비처(fusion, longitudinal)가 이 값 하나를
+        # 공유해야 켜지고 꺼지는 시점이 어긋나지 않는다. (cone_zone.py 참고)
+        in_cone_zone = self.cone_zone.update(dt, self.obs.cone_n)
+
         # 차선(카메라)과 콘 복도(라이다)를 섞어 최종 횡방향 기준을 만든다.
         # 라바콘 구간에서는 콘 벽이 실제 주행 가능 경계이므로 복도 쪽 비중이 커진다.
         # obstacle_node 가 죽어도 마지막 /corridor 값은 남아 있다. 낡은 복도를
@@ -355,6 +382,7 @@ class DriverNode(Node):
             LateralRef(self.obs.cor_near, self.obs.cor_far,
                        self.obs.cor_valid and cor_fresh, self.obs.cor_quality),
             self.obs.cone_n,
+            cone_zone=in_cone_zone,
         )
         self._ref = ref
 
@@ -384,6 +412,7 @@ class DriverNode(Node):
             ref.valid, ref.offset_near, ref.offset_far,
             ref.quality, self.obs.cone_n, self.obs.front_dist,
             overtake_active=self.lateral.overtake.active,
+            cone_zone=in_cone_zone,
         )
         speed = self.speed_limiter.update(dt, target_speed)
 
@@ -416,6 +445,9 @@ class DriverNode(Node):
             "light": LIGHT_NAME.get(self.obs.light, "?"),
             "front_dist": round(self.obs.front_dist, 2),
             "cone_n": self.obs.cone_n,
+            # 라이다를 쓰고 있는 구간인지. 화면에서 바로 구분돼야 "지금 복도를
+            # 따라가는 중인가, 차선을 따라가는 중인가"를 오해하지 않는다.
+            "cone_zone": bool(self.cone_zone.active),
             "overtake": ov,
             # 회피 기동의 근거를 그대로 노출한다. 화면만 보고 "왜 저쪽으로
             # 피했는가 / 왜 안 피하는가"를 알 수 있어야 튜닝이 가능하다.
@@ -441,7 +473,8 @@ class DriverNode(Node):
             f"q={ref.quality:.2f} {'OK' if ref.valid else 'HOLD'} "
             f"[{ref.source} w{ref.corridor_weight:.2f}] | "
             f"light={LIGHT_NAME.get(self.obs.light, '?')} front={self.obs.front_dist:.2f}m "
-            f"cone={self.obs.cone_n} ov={ov} | {reason}"
+            f"cone={self.obs.cone_n}{'[ZONE]' if self.cone_zone.active else ''} "
+            f"ov={ov} | {reason}"
         )
 
 

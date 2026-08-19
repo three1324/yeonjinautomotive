@@ -40,33 +40,46 @@ class OvertakePhase(Enum):
 
 
 class OvertakeBehavior:
-    """방해차량 회피 서브행동.
+    """방해차량 회피 서브행동. **카메라만 쓴다 (라이다 사용 안 함).**
 
     트리거 조건 (모두 만족해야 시작):
       - 카메라가 차량을 봤다 (라바콘이 아니라 차량이라는 건 YOLO만 안다)
       - 그 차량이 충분히 가깝다 (bbox 하단 y가 임계 이상)
-      - 라이다 전방 거리도 임계 이하 (카메라 오검출에 속지 않기 위한 교차확인)
-      - 피할 쪽에 여유가 있다 (라이다 좌/우 여유)
       - 쿨다운 중이 아니다
 
-    카메라와 라이다를 둘 다 요구하는 이유: 한쪽만 믿으면 오검출로 갑자기
-    차선을 벗어나는 위험한 동작이 나온다. 다만 라이다 없이 **영상만으로**
-    이 로직을 시험하려면 `require_lidar_confirm=False` 로 끌 수 있다
-    (replay.launch.py 전용. 실차에서는 반드시 True).
+    ────────────────────────────────────────────────────────────────
+    왜 라이다를 뺐나 (2026-08-19 실차 결정)
+
+    이전에는 라이다 전방거리로 트리거를 교차확인하고 좌/우 여유로 피할
+    쪽을 골랐다. 실차에서 그게 두 가지 문제를 만들었다:
+
+      1. 라이다가 콘·벽·기둥을 방해차량과 구분하지 못해, 차가 없는데도
+         전방거리가 임계 아래로 떨어지거나 반대로 차가 있는데 섹터를
+         비껴가 트리거가 안 걸렸다.
+      2. 옆으로 벌리는 순간 장애물이 섹터에서 빠져 front_dist 가 커지고,
+         그러면 PASS 탈출 조건이 곧바로 참이 돼 회피가 무의미해졌다.
+
+    방해차량인지 아닌지는 **YOLO만 안다**(AvanteN/ionic5 클래스). 라이다는
+    그 판단에 기여하는 정보가 없으면서 오작동 경로만 늘렸다. 그래서 회피는
+    카메라 단독으로 하고, 라이다는 라바콘 구간 전용으로 분리했다
+    (cone_zone.py / fusion.py 참고).
+
+    피할 방향도 카메라로 정한다 — 차가 화면 왼쪽에 있으면 오른쪽으로.
+    회피량이 트랙 반폭의 절반이라 목표가 **구조적으로 트랙 안쪽**이므로,
+    라이다 여유 확인 없이도 실선을 넘지 않는다.
+    ────────────────────────────────────────────────────────────────
 
     회피량: 트랙 반폭의 절반 = 트랙 반쪽의 중앙. 반폭 미학습이면 shift_px 폴백.
     시작 시점에 한 번 계산해 **고정**한다 — 기동 도중 반폭 추정이 흔들려도
     목표가 따라 흔들리면 조향이 진동하기 때문이다.
     """
 
-    def __init__(self, shift_px, trigger_bottom_y, trigger_front_dist,
-                 side_clearance, shift_sec, pass_sec, return_sec,
+    def __init__(self, shift_px, trigger_bottom_y,
+                 shift_sec, pass_sec, return_sec,
                  cooldown_sec=1.0, pass_exit_ratio=0.85,
-                 pass_exit_cx_ratio=0.85, require_lidar_confirm=True):
+                 pass_exit_cx_ratio=0.85):
         self.shift_px = shift_px                    # 반폭 미학습 시 폴백값 (픽셀)
         self.trigger_bottom_y = trigger_bottom_y    # 차량 bbox 하단 y 임계 (클수록 가까움)
-        self.trigger_front_dist = trigger_front_dist  # 라이다 전방 거리 임계 (m)
-        self.side_clearance = side_clearance        # 피할 쪽 최소 여유 (m)
         self.shift_sec = shift_sec
         self.pass_sec = pass_sec                    # PASS 유지의 **상한** (안전장치)
         self.return_sec = return_sec
@@ -81,7 +94,6 @@ class OvertakeBehavior:
         # 않았고, pass_sec 상한(1.5s)으로만 복귀했다. 옆을 스쳐 지나가는 차는
         # 가까워지면서 화면 밖으로 나가므로 bottom_y 만으로는 못 잡는다.
         self.pass_exit_cx_ratio = pass_exit_cx_ratio
-        self.require_lidar_confirm = require_lidar_confirm
 
         self.phase = OvertakePhase.IDLE
         self._t = 0.0
@@ -110,17 +122,14 @@ class OvertakeBehavior:
         """+1 오른쪽 / -1 왼쪽 / 0 없음. 진단·시각화용."""
         return self._dir
 
-    def _pick_side(self, car_cx, image_width, left_free, right_free):
-        """차량 반대쪽으로 피하되, 여유가 없으면 반대쪽, 그것도 없으면 포기(0)."""
-        car_on_left = car_cx < image_width / 2.0
-        first = 1 if car_on_left else -1        # 차가 왼쪽이면 오른쪽으로
-        second = -first
+    def _pick_side(self, car_cx, image_width):
+        """차량 반대쪽으로 피한다. 카메라의 차량 x중심만 본다.
 
-        for d in (first, second):
-            free = right_free if d > 0 else left_free
-            if free >= self.side_clearance:
-                return d
-        return 0
+        라이다 좌/우 여유 확인을 하지 않는 이유는 클래스 주석 참고 —
+        회피량이 트랙 반폭의 절반이라 목표가 항상 트랙 안쪽이다.
+        """
+        car_on_left = car_cx < image_width / 2.0
+        return 1 if car_on_left else -1         # 차가 왼쪽이면 오른쪽으로
 
     def _shift_amount(self, half_near):
         """이번 기동에서 옆으로 옮길 양(픽셀).
@@ -134,20 +143,18 @@ class OvertakeBehavior:
         return self.shift_px
 
     def update(self, dt, car_present, car_cx, car_bottom_y,
-               front_dist, left_free, right_free, image_width, half_near=0.0):
-        """회피로 인한 목표 오프셋 보정량(픽셀)을 반환한다. 평소 0."""
+               image_width, half_near=0.0):
+        """회피로 인한 목표 오프셋 보정량(픽셀)을 반환한다. 평소 0.
+
+        인자에 라이다 값이 없다 — 의도적이다. 클래스 주석 참고.
+        """
         if self.phase is OvertakePhase.IDLE:
             if self._cooldown > 0.0:
                 self._cooldown = max(0.0, self._cooldown - dt)
                 return 0.0
 
-            near_enough = car_present and car_bottom_y >= self.trigger_bottom_y
-            lidar_ok = (not self.require_lidar_confirm) or front_dist <= self.trigger_front_dist
-            if near_enough and lidar_ok:
-                d = self._pick_side(car_cx, image_width, left_free, right_free)
-                if d == 0:
-                    self.last_reason = "no side clearance"
-                    return 0.0
+            if car_present and car_bottom_y >= self.trigger_bottom_y:
+                d = self._pick_side(car_cx, image_width)
                 self._dir = d
                 self._amount = self._shift_amount(half_near)
                 self.phase = OvertakePhase.SHIFT
@@ -179,12 +186,6 @@ class OvertakeBehavior:
                   and abs(car_cx - image_width / 2.0) / (image_width / 2.0)
                   > self.pass_exit_cx_ratio):
                 reason = f"car at edge(cx{car_cx:.0f})"
-            elif (self.require_lidar_confirm
-                  and front_dist > self.trigger_front_dist * 1.5):
-                # 라이다를 안 쓰는 설정에서는 front_dist 가 항상 99.0(개활)이라
-                # 이 조건이 **기동 첫 tick 에 즉시 참**이 된다. 그러면 벌리자마자
-                # 복귀해 회피가 무의미해진다. 그래서 라이다를 신뢰할 때만 본다.
-                reason = f"front clear({front_dist:.2f}m)"
             elif self._t >= self.pass_sec:
                 # 위 셋 다 아닌데 시간이 다 됐다 = 관측이 계속 "앞에 있다"고 말하는
                 # 상황이다. 무한정 벌린 채로 달릴 수는 없으니 상한으로 끊는다.
@@ -232,10 +233,11 @@ class LateralPlanner:
         target = 0.0   # 기본은 트랙 중앙
 
         if self.enable_overtake:
+            # 카메라 관측만 넘긴다. obs 에는 라이다 값(front_dist 등)도 들어 있지만
+            # 회피는 그걸 쓰지 않는다 (OvertakeBehavior 주석 참고).
             target += self.overtake.update(
                 dt,
                 obs.car_present, obs.car_cx, obs.car_bottom_y,
-                obs.front_dist, obs.left_free, obs.right_free,
                 image_width,
                 half_near=getattr(obs, "half_near", 0.0),
             )

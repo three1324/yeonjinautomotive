@@ -17,10 +17,19 @@ ROS 의존성 없음 (표준 라이브러리만). 오프라인 검증 가능.
 그래서 가중치를 두고 **시간에 걸쳐 서서히** 옮긴다.
 
 가중치 결정:
+    라바콘 구간 밖 -> **가중치 0. 라이다를 아예 쓰지 않는다** (아래 참고)
     콘 개수      -> 복도 쪽 목표 가중치 (콘이 많을수록 복도를 믿는다)
     각자 quality -> 신뢰도가 낮은 쪽 비중을 깎는다
     한쪽이 invalid -> 나머지 하나를 그대로 쓴다
     둘 다 invalid  -> 결과도 invalid (driver 가 hold/정지 판단)
+
+────────────────────────────────────────────────────────────────────────
+라바콘 구간 밖에서는 라이다를 쓰지 않는다 (2026-08-19 실차 결정)
+
+콘 개수로 가중치를 깎는 것만으로는 부족했다. "차선을 놓치면 복도 100%"
+규칙이 콘과 무관한 구간에서도 발동해, 차선을 잠깐 놓칠 때마다 라이다가
+잡은 벽·기둥·관중을 주행 기준으로 삼았다. 구간 판정(cone_zone.py)을
+하드 게이트로 앞에 두어 이 경로 자체를 막는다.
 
 가중치 자체도 초당 변화율을 제한해서 튀지 않게 한다.
 """
@@ -83,14 +92,21 @@ class LateralFusion:
     def corridor_weight(self):
         return self._w
 
-    def _target_weight(self, lane, corridor, cone_n):
+    def _target_weight(self, lane, corridor, cone_n, cone_zone):
         """이번 프레임이 원하는 복도 가중치 (아직 rate limit 적용 전)."""
+        # 라바콘 구간 밖에서는 라이다를 아예 쓰지 않는다 (2026-08-19 결정).
+        # cone_n 임계만으로 가중치를 깎는 것으로는 부족했다 — 아래 "차선 소실 ->
+        # 복도 100%" 규칙이 콘과 무관한 곳에서도 발동해, 차선을 잠깐 놓칠 때마다
+        # 라이다가 잡은 벽·기둥을 주행 기준으로 삼아버렸다.
+        if not cone_zone:
+            return 0.0
+
         corridor_ok = corridor.valid and corridor.quality >= self.min_corridor_quality
 
         if not corridor_ok:
             return 0.0
         if not lane.valid:
-            # 차선을 못 보는데 복도는 보인다 -> 복도에 전적으로 의존
+            # 콘 구간 안에서 차선을 못 보는데 복도는 보인다 -> 복도에 전적으로 의존
             return 1.0
 
         # 콘이 많을수록 복도를 믿는다
@@ -102,9 +118,13 @@ class LateralFusion:
             w = min(w, self.max_corridor_weight)
         return w
 
-    def update(self, dt, lane, corridor, cone_n):
-        """프레임당 1회. lane/corridor 는 LateralRef 호환 객체."""
-        target = self._target_weight(lane, corridor, cone_n)
+    def update(self, dt, lane, corridor, cone_n, cone_zone=False):
+        """프레임당 1회. lane/corridor 는 LateralRef 호환 객체.
+
+        cone_zone: 지금이 라바콘 구간인가 (cone_zone.ConeZoneDetector 판정).
+                   False 면 복도(라이다)를 아예 섞지 않는다.
+        """
+        target = self._target_weight(lane, corridor, cone_n, cone_zone)
 
         # 가중치 변화율 제한 — 전환 시 목표가 점프하지 않게
         step = self.weight_rate_per_sec * max(dt, 1e-3)

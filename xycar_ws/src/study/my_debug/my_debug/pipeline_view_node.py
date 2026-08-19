@@ -110,7 +110,11 @@ class PipelineViewNode(Node):
             cv2.putText(
                 bar,
                 f"5) control  angle={s['angle']:+.1f}  speed={s['speed']:.1f}  "
-                f"light={s['light']} front={s['front_dist']:.2f}m cone={s['cone_n']} "
+                f"light={s['light']} front={s['front_dist']:.2f}m "
+                # 라이다를 쓰는 구간인지 한눈에 보이게 한다. CONE 표시가 없는데
+                # front 값에 반응해 느려진다면 그건 버그다 (콘 구간 밖에서는
+                # 라이다 상한을 안 쓰기로 했으므로).
+                f"cone={s['cone_n']}{'[ZONE]' if s.get('cone_zone') else ''} "
                 f"| {s['reason']}",
                 (10, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.55, _TXT, 1, cv2.LINE_AA)
 

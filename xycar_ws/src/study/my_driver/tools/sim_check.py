@@ -77,7 +77,6 @@ def make_controllers(a):
     )
     lateral = LateralPlanner(
         OvertakeBehavior(shift_px=120.0, trigger_bottom_y=300.0,
-                         trigger_front_dist=1.5, side_clearance=0.6,
                          shift_sec=0.8, pass_sec=1.5, return_sec=1.0),
         enable_overtake=True,
     )
