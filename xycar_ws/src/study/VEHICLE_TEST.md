@@ -121,19 +121,45 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
 - [ ] `/scan` 이 살아난 뒤 `/obstacle` `/corridor` 도 오는지 확인
       (`obstacle_node` 가 이 둘을 낸다. 라이다가 죽어 있으면 둘 다 안 나온다)
 
-- [ ] **라이다 사용 구간이 라바콘 구간뿐인지 확인** (2026-08-19 분리 이후)
+- [ ] **★ `xycar_motor` 발행자가 하나뿐인지 확인** — 가장 위험한 실수
 
-      `driver_node` 로그의 `cone=N` 뒤에 `[ZONE]` 이 붙어 있을 때만 라이다가
-      쓰인다. 콘이 없는 직선/곡선에서 `[ZONE]` 이 뜨거나, 반대로 콘 구간인데
-      안 뜨면 `cone_zone.enter_n / exit_n` 을 조정할 것.
-
-      ```
-      [LANE_DRIVE] ... cone=0        ov=- | clear        <- 라이다 미사용 (정상)
-      [LANE_DRIVE] ... cone=7[ZONE]  ov=- | cone(x7)     <- 라이다 사용 중
+      ```bash
+      ros2 topic info /xycar_motor
       ```
 
-      `[ZONE]` 이 없는데 `reason` 에 `STOP(...)` 이나 `obstacle(...)` 이 뜨면
-      **버그다** — 콘 구간 밖에서는 라이다 전방거리를 안 쓰기로 했다.
+      **Publisher count 는 반드시 1** 이어야 한다(`driver_node`).
+      `rubbercone_node` 의 `drive_topic` 기본값이 `xycar_motor` 라서,
+      params 파일 없이 수동으로 띄우면(`ros2 run my_obstacle rubbercone_node`)
+      발행자가 둘이 되어 서로 다른 명령이 섞이고 **차가 요동친다.**
+      launch 로 띄우면 yaml 이 `cone_cmd` 로 돌려주므로 안전하다.
+
+- [ ] **라바콘 구간 전환 확인** (2026-08-19 mux 구조)
+
+      구간 판정과 주행은 `rubbercone_node` 가 전담하고, `driver_node` 는
+      구간일 때 그 명령을 그대로 통과시킨다.
+
+      ```bash
+      ros2 topic echo /cone_zone_active     # 콘 앞에서 true 로 바뀌는지
+      ros2 topic hz   /cone_cmd             # 약 10Hz (스캔 주기) 로 나오는지
+      ```
+
+      `driver_node` 로그에서 전환을 확인:
+
+      ```
+      [INFO] CONE_ZONE — rubbercone_node 로 전환
+      [LANE_DRIVE] ... | cone_zone(rubbercone)     <- 라이다가 몰고 있음
+      [INFO] CONE_ZONE 이탈 — 차선 주행으로 복귀
+      ```
+
+      ⚠️ `CONE_ZONE 인데 /cone_cmd 가 끊겼다` 경고가 뜨면 라이다나 그 노드가
+      죽은 것이다. 차선 주행으로 비상 대체되지만 **콘을 칠 수 있으니**
+      즉시 §3-1 로 라이다를 점검할 것.
+
+- [ ] **콘 구간 밖에서 라이다 간섭이 없는지 확인**
+
+      `cone_zone(rubbercone)` 이 아닌 상태에서 `reason` 에 `STOP(...)` 이나
+      `obstacle(...)` 이 뜨면 **버그다** — 콘 구간 밖에서는 라이다 전방거리를
+      안 쓰기로 했다(`speed.obstacle_cap_in_cone_only: true`).
 
 - [ ] **★ 콘 구간 rosbag 을 딴다** — 복도 추정 튜닝값이 전부 **합성 데이터 기반**이라
       실제 콘 간격·복도 폭으로 재검증해야 한다. **절차는 §9 참고.**

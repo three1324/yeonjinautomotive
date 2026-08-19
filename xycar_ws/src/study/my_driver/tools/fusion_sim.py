@@ -12,9 +12,10 @@
 
 핵심 관심사는 **전환 중 프레임간 목표 변화량**이다. 이게 크면 조향이 튄다.
 
-driver_node 와 **같은 경로**를 탄다: 콘 개수 -> ConeZoneDetector -> cone_zone
--> LateralFusion. 여기서 cone_zone 을 손으로 넣으면 실차와 다른 것을 검증하게
-되므로 그러지 않는다.
+⚠️ 이 경로는 **비상 대체용**이다. 평소 라바콘 구간은 rubbercone_node 가
+통째로 담당하고(driver_node 가 /cone_cmd 를 그대로 통과시킨다), 여기 복도
+융합은 그 노드가 죽었을 때만 쓰인다. 그래서 cone_zone 을 시뮬에서 직접
+넣는다 — 실차에서는 /cone_zone_active 토픽으로 들어온다.
 """
 
 import os
@@ -28,28 +29,25 @@ if getattr(sys.stdout, "encoding", "") and sys.stdout.encoding.lower() not in ("
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from my_driver.cone_zone import ConeZoneDetector  # noqa: E402
 from my_driver.fusion import LateralFusion, LateralRef  # noqa: E402
 
 DT = 1.0 / 30.0
 
 
 def run(name, steps, expect_corridor=None, **kw):
-    """steps: [(설명, 프레임수, lane, corridor, cone_n), ...]
+    """steps: [(설명, 프레임수, lane, corridor, cone_zone), ...]
 
     expect_corridor: 마지막 구간에서 복도가 섞여야 하면 True, 아니면 False.
                      None 이면 검사하지 않는다(점프 크기만 본다).
     """
     fus = LateralFusion(**kw)
-    zone = ConeZoneDetector()
     prev = None
     max_jump = 0.0
     jump_at = ""
     rows = []
 
-    for label, n, lane, cor, cone in steps:
+    for label, n, lane, cor, in_zone in steps:
         for i in range(n):
-            in_zone = zone.update(DT, cone)
             r = fus.update(DT, lane, cor, cone_zone=in_zone)
             if prev is not None and r.valid:
                 j = abs(r.offset_near - prev)
@@ -88,10 +86,10 @@ ok = []
 
 ok.append(run(
     "콘 구간 진입 -> 통과 -> 이탈",
-    [("콘 없음 (차선)", 30, LANE_OK, COR_OK, 0),
-     ("콘 진입 (6개)", 60, LANE_OK, COR_OK, 6),
-     ("콘 구간 중 (8개)", 30, LANE_OK, COR_OK, 8),
-     ("콘 이탈", 120, LANE_OK, COR_OK, 0)],
+    [("콘 없음 (차선)", 30, LANE_OK, COR_OK, False),
+     ("콘 구간 진입", 60, LANE_OK, COR_OK, True),
+     ("콘 구간 중", 30, LANE_OK, COR_OK, True),
+     ("콘 이탈", 120, LANE_OK, COR_OK, False)],
     expect_corridor=False,   # 이탈 후에는 복도를 놓아야 한다
 ))
 
@@ -101,43 +99,42 @@ ok.append(run(
 # 차선을 놓쳐도 복도를 쓰지 않는다 (대신 driver 가 hold -> 정지 판단).
 ok.append(run(
     "[핵심] 콘 구간 밖 차선 소실 — 복도를 쓰면 안 됨",
-    [("차선 정상", 30, LANE_OK, COR_OK, 0),
-     ("차선 소실 (콘 없음)", 60, NONE, COR_OK, 0)],
+    [("차선 정상", 30, LANE_OK, COR_OK, False),
+     ("차선 소실 (구간 밖)", 60, NONE, COR_OK, False)],
     expect_corridor=False,
 ))
 
 ok.append(run(
     "콘 구간 안에서 차선 소실 — 복도로 넘어가야 함",
-    [("콘 구간 진입", 60, LANE_OK, COR_OK, 8),
-     ("차선 소실 (콘 유지)", 60, NONE, COR_OK, 8)],
+    [("콘 구간 진입", 60, LANE_OK, COR_OK, True),
+     ("차선 소실 (구간 안)", 60, NONE, COR_OK, True)],
     expect_corridor=True,
 ))
 
 ok.append(run(
     "복도 신뢰도 낮음 — 섞이면 안 됨",
-    [("콘 많지만 q낮음", 60, LANE_OK, COR_LOWQ, 8)],
+    [("구간 안, 복도 q낮음", 60, LANE_OK, COR_LOWQ, True)],
     expect_corridor=False,
 ))
 
 ok.append(run(
     "둘 다 소실",
-    [("정상", 30, LANE_OK, COR_OK, 0),
-     ("둘 다 없음", 30, NONE, NONE, 0)],
+    [("정상", 30, LANE_OK, COR_OK, False),
+     ("둘 다 없음", 30, NONE, NONE, False)],
 ))
 
 # 차선도 없고 복도도 못 믿을 때 — invalid 로 떨어져야 driver 가 hold/정지한다.
 # 붙잡아둔 값을 valid 로 내보내면 driver 가 유효한 기준으로 오해한다.
 r = run(
     "차선 소실 + 복도 저신뢰 — invalid 여야 함",
-    [("정상", 30, LANE_OK, COR_OK, 0),
-     ("차선 소실, 복도 q낮음", 60, NONE, COR_LOWQ, 8)],
+    [("정상", 30, LANE_OK, COR_OK, False),
+     ("차선 소실, 복도 q낮음", 60, NONE, COR_LOWQ, True)],
 )
 fus = LateralFusion()
-zone = ConeZoneDetector()
 for _ in range(30):
-    fus.update(DT, LANE_OK, COR_OK, cone_zone=zone.update(DT, 0))
+    fus.update(DT, LANE_OK, COR_OK, cone_zone=False)
 for _ in range(60):
-    last = fus.update(DT, NONE, COR_LOWQ, cone_zone=zone.update(DT, 8))
+    last = fus.update(DT, NONE, COR_LOWQ, cone_zone=True)
 print(f"  -> valid={last.valid} (False 여야 함)   "
       f"{'OK' if not last.valid else '틀림'}")
 ok.append(r and not last.valid)
@@ -146,11 +143,9 @@ print()
 print("전환 속도(weight_rate_per_sec)에 따른 최대 점프  [콘 구간 안]")
 for rate in (0.5, 1.5, 5.0, 30.0):
     fus = LateralFusion(weight_rate_per_sec=rate)
-    zone = ConeZoneDetector()
     prev, mx = None, 0.0
     for i in range(120):
-        cone = 0 if i < 30 else 8
-        r = fus.update(DT, LANE_OK, COR_OK, cone_zone=zone.update(DT, cone))
+        r = fus.update(DT, LANE_OK, COR_OK, cone_zone=(i >= 30))
         if prev is not None:
             mx = max(mx, abs(r.offset_near - prev))
         prev = r.offset_near

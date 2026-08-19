@@ -11,6 +11,8 @@
     /light     Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT
     /objects   Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y]
     /obstacle  Float32MultiArray [front_dist, left_free, right_free]
+    /cone_cmd  Float32MultiArray [angle, speed]  라바콘 구간 전담 노드의 명령
+    /cone_zone_active Bool                       그 노드의 구간 판정
 발행:
     xycar_motor Float32MultiArray [angle, speed]
     debug_state String            JSON. my_debug/pipeline_view_node 시각화 전용.
@@ -26,16 +28,29 @@
 ────────────────────────────────────────────────────────────────────────
 센서 역할 분리 (2026-08-19 실차 결정)
 
-    카메라  차선 추종 · 신호등 · **방해차량 회피** · 라바콘 구간 진입 판정
-    라이다  **라바콘 구간에서만** — 콘 복도 중앙(/corridor) + 전방 장애물 상한
+    카메라  차선 추종 · 신호등 · **방해차량 회피**
+    라이다  **라바콘 구간에서만** — my_obstacle/rubbercone_node 가 전담
 
 라이다는 트랙 밖 벽·기둥·관중과 실제 장애물을 구분하지 못한다. 상시
 사용하면 곡선에서 벽이 섹터에 들어올 때마다 정지가 걸리고, 차선을 잠깐
-놓칠 때마다 엉뚱한 것을 주행 기준으로 삼는다. 콘 구간은 통로가 좁아
-섹터 안이 곧 콘 벽이므로 그 구간에서만 신뢰한다.
+놓칠 때마다 엉뚱한 것을 주행 기준으로 삼는다.
 
-구간 판정은 cone_zone.ConeZoneDetector 한 곳에서만 하고, 그 결과를
-fusion / longitudinal 두 소비처가 공유한다 (켜지는 시점이 어긋나지 않게).
+────────────────────────────────────────────────────────────────────────
+라바콘 구간은 통째로 넘긴다 (mux)
+
+`rubbercone_node` 는 팀원이 **실차에서 성공시킨 구현**을 그대로 가져온
+것이다(콘 클러스터링 -> 좌우 페어링 -> Pure Pursuit, 실패 시 Follow-the-Gap).
+그 노드가 구간 판정부터 조향·속도까지 스스로 다 만든다.
+
+    rubbercone_node --/cone_zone_active--> 여기서 mux 판단
+                    --/cone_cmd---------> 구간이면 그대로 통과
+
+우리가 중간에서 손대면 검증된 동작이 깨지므로 **조향은 건드리지 않는다.**
+속도만 SpeedLimiter 를 통과시키는데, 알고리즘이 아니라 VESC 저전압 fault
+방지(하드웨어 보호) 때문이다 — _drive_cone_zone() 주석 참고.
+
+그 노드가 죽으면(cone_cmd 가 stale) 아래 차선/복도 경로가 비상 대체로
+동작한다. 그때만 fusion 의 /corridor 가 쓰인다.
 """
 
 import json
@@ -46,7 +61,6 @@ from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
-from my_driver.cone_zone import ConeZoneDetector
 from my_driver.control import SpeedLimiter, SteeringController
 from my_driver.fsm import DriveFSM, State
 from my_driver.fusion import FusedResult, LateralFusion, LateralRef
@@ -109,10 +123,10 @@ class DriverNode(Node):
                 ("fsm.start_confirm_frames", 5),
                 ("fsm.enable_shortcut", False),
                 ("fsm.auto_start", False),
-                # 라바콘 구간 판정 — 라이다를 쓸 구간을 여기서 정한다 (cone_zone.py)
-                ("cone_zone.enter_n", 3),
-                ("cone_zone.exit_n", 1),
-                ("cone_zone.exit_hold_sec", 1.5),
+                # 라바콘 구간 — my_obstacle/rubbercone_node 가 판정·주행을 전담한다.
+                # 이 값은 그 노드의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
+                # 그 노드는 /scan 주기(약 10Hz)로 발행하므로 0.5s 면 5프레임 여유.
+                ("cone_cmd_timeout_sec", 0.5),
                 # 차선 <-> 복도 전환 (구간에 따라 센서가 통째로 바뀐다)
                 ("fusion.weight_rate_per_sec", 1.5),
                 ("fusion.min_corridor_quality", 0.4),
@@ -167,12 +181,7 @@ class DriverNode(Node):
             enable_shortcut=g("fsm.enable_shortcut").value,
             auto_start=g("fsm.auto_start").value,
         )
-        # 라이다를 쓸 구간(라바콘)을 정하는 유일한 판정자. 카메라 콘 개수로 판단한다.
-        self.cone_zone = ConeZoneDetector(
-            enter_n=g("cone_zone.enter_n").value,
-            exit_n=g("cone_zone.exit_n").value,
-            exit_hold_sec=g("cone_zone.exit_hold_sec").value,
-        )
+        self.cone_cmd_timeout = g("cone_cmd_timeout_sec").value
         self.fusion = LateralFusion(
             weight_rate_per_sec=g("fusion.weight_rate_per_sec").value,
             min_corridor_quality=g("fusion.min_corridor_quality").value,
@@ -230,6 +239,11 @@ class DriverNode(Node):
         self._last_corridor_time = None
         self._lane_lost_since = None
         self._target_offset = 0.0
+        # 라바콘 노드 mux 상태
+        self._cone_cmd = (0.0, 0.0)      # (angle, speed)
+        self._last_cone_cmd_time = None
+        self._cone_zone_from_node = False
+        self._last_source = "lane"        # 전환 로그를 한 번만 찍기 위한 기억
         self._last_tick = self.get_clock().now()
         self._last_log = self._last_tick
 
@@ -249,6 +263,11 @@ class DriverNode(Node):
         self.create_subscription(Float32MultiArray, "objects", self.on_objects, qos)
         self.create_subscription(Float32MultiArray, "obstacle", self.on_obstacle, qos)
         self.create_subscription(Bool, "drive_enable", self.on_enable, qos)
+        # 라바콘 구간 전담 노드(my_obstacle/rubbercone_node)의 출력.
+        # 그 노드가 스스로 구간을 판정하고 조향/속도까지 다 만든다. 우리는
+        # 구간일 때 그 명령을 **그대로 통과**시키기만 한다 (§ 센서 역할 분리).
+        self.create_subscription(Float32MultiArray, "cone_cmd", self.on_cone_cmd, qos)
+        self.create_subscription(Bool, "cone_zone_active", self.on_cone_zone, qos)
 
         hz = g("control_hz").value
         self.create_timer(1.0 / hz, self.on_tick)
@@ -305,6 +324,15 @@ class DriverNode(Node):
         self.obs.left_free = msg.data[1]
         self.obs.right_free = msg.data[2]
 
+    def on_cone_cmd(self, msg):
+        if len(msg.data) < 2:
+            return
+        self._cone_cmd = (float(msg.data[0]), float(msg.data[1]))
+        self._last_cone_cmd_time = self.get_clock().now()
+
+    def on_cone_zone(self, msg):
+        self._cone_zone_from_node = bool(msg.data)
+
     def on_enable(self, msg):
         self._enabled = bool(msg.data)
         self.get_logger().warn(f"drive_enable = {self._enabled}")
@@ -353,11 +381,33 @@ class DriverNode(Node):
             self._pub_debug(state.value, 0.0, 0.0, "wait")
             return
 
-        # ── 라이다를 쓸 구간인가 (2026-08-19 결정: 라바콘 구간에서만) ──
-        # 판정은 **카메라** 콘 개수로 한다. 라이다를 언제 쓸지를 라이다로 정하면
-        # 순환이기 때문이다. 아래 두 소비처(fusion, longitudinal)가 이 값 하나를
-        # 공유해야 켜지고 꺼지는 시점이 어긋나지 않는다. (cone_zone.py 참고)
-        in_cone_zone = self.cone_zone.update(dt, self.obs.cone_n)
+        # ── 라바콘 구간이면 전담 노드에 통째로 넘긴다 (2026-08-19) ──
+        # rubbercone_node 는 팀원이 실차에서 검증한 구현이고, 구간 판정부터
+        # 조향·속도 산출까지 스스로 다 한다. 우리는 그 출력을 **그대로**
+        # xycar_motor 로 흘려보내기만 한다 — 중간에서 손대면 검증된 동작이 깨진다.
+        cone_cmd_fresh = (
+            self._last_cone_cmd_time is not None
+            and (now - self._last_cone_cmd_time).nanoseconds / 1e9 <= self.cone_cmd_timeout
+        )
+        if self._cone_zone_from_node and cone_cmd_fresh:
+            self._drive_cone_zone(dt, state)
+            return
+
+        if self._last_source != "lane":
+            if self._cone_zone_from_node:
+                # 구간이라는데 명령이 안 온다 = 그 노드가 죽었거나 라이다가 끊겼다.
+                # 조용히 차선 주행으로 돌아가면 콘을 칠 수 있으므로 경고를 남긴다.
+                self.get_logger().warn(
+                    "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 차선 주행으로 비상 대체")
+            else:
+                self.get_logger().info("CONE_ZONE 이탈 — 차선 주행으로 복귀")
+            self._last_source = "lane"
+
+        # 구간 판정은 rubbercone_node(라이다) 것을 그대로 쓴다. 카메라 콘 개수로
+        # 따로 판정하면 두 판정이 어긋나는 순간이 생긴다.
+        # 여기 도달했다는 건 "구간이 아니거나, 구간인데 그 노드가 죽었다"는 뜻이다.
+        # 후자면 아래 차선/복도 경로가 비상 대체로 동작한다.
+        in_cone_zone = self._cone_zone_from_node
 
         # 차선(카메라)과 콘 복도(라이다)를 섞어 최종 횡방향 기준을 만든다.
         # 라바콘 구간에서는 콘 벽이 실제 주행 가능 경계이므로 복도 쪽 비중이 커진다.
@@ -420,6 +470,34 @@ class DriverNode(Node):
         self._log(state, angle, speed, self.longitudinal.last_reason)
         self._pub_debug(state.value, angle, speed, self.longitudinal.last_reason)
 
+    def _drive_cone_zone(self, dt, state):
+        """라바콘 구간 — rubbercone_node 명령을 그대로 통과시킨다.
+
+        조향은 **손대지 않는다.** 그 노드가 이미 목표점 평활화(프레임당 12cm
+        clamp + EMA)를 하고 있고, 거기에 우리 rate limit 을 또 씌우면 검증된
+        응답이 느려진다.
+
+        속도만 SpeedLimiter 를 통과시킨다 — 알고리즘이 아니라 **하드웨어 보호**
+        때문이다. 가속을 제한하지 않으면 기동 전류가 배터리 전압을 끌어내려
+        VESC 가 fault code 2(UNDER_VOLTAGE)로 멈춘다(2026-08-19 실측으로
+        accel_per_sec 을 20->8 로 낮춘 근거와 같다). 이 노드는 자체 가속 제한이
+        없으므로 여기서 씌운다.
+        """
+        angle, cone_speed = self._cone_cmd
+        speed = self.speed_limiter.update(dt, cone_speed)
+
+        # 조향기 내부 상태를 실제 출력에 맞춰둔다. 구간을 빠져나가 우리 제어로
+        # 돌아가는 순간 steering 이 0 에서 시작하면 그만큼 각도가 튄다.
+        self.steering.sync(angle)
+
+        if self._last_source != "cone":
+            self.get_logger().info("CONE_ZONE — rubbercone_node 로 전환")
+            self._last_source = "cone"
+
+        self._publish(angle, speed)
+        self._log(state, angle, speed, "cone_zone(rubbercone)")
+        self._pub_debug(state.value, angle, speed, "cone_zone(rubbercone)")
+
     def _pub_debug(self, state_name, angle, speed, reason):
         """my_debug/pipeline_view_node 용 실시간 상태 스냅샷. 매 tick 발행 —
         문자열 하나 만드는 비용이라 30Hz 로 던져도 무시할 만하다."""
@@ -440,7 +518,7 @@ class DriverNode(Node):
             "cone_n": self.obs.cone_n,
             # 라이다를 쓰고 있는 구간인지. 화면에서 바로 구분돼야 "지금 복도를
             # 따라가는 중인가, 차선을 따라가는 중인가"를 오해하지 않는다.
-            "cone_zone": bool(self.cone_zone.active),
+            "cone_zone": bool(self._cone_zone_from_node),
             "overtake": ov,
             # 회피 기동의 근거를 그대로 노출한다. 화면만 보고 "왜 저쪽으로
             # 피했는가 / 왜 안 피하는가"를 알 수 있어야 튜닝이 가능하다.
@@ -466,7 +544,7 @@ class DriverNode(Node):
             f"q={ref.quality:.2f} {'OK' if ref.valid else 'HOLD'} "
             f"[{ref.source} w{ref.corridor_weight:.2f}] | "
             f"light={LIGHT_NAME.get(self.obs.light, '?')} front={self.obs.front_dist:.2f}m "
-            f"cone={self.obs.cone_n}{'[ZONE]' if self.cone_zone.active else ''} "
+            f"cone={self.obs.cone_n}{'[ZONE]' if self._cone_zone_from_node else ''} "
             f"ov={ov} | {reason}"
         )
 

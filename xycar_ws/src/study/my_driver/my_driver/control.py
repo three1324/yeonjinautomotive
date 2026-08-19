@@ -88,6 +88,19 @@ class SteeringController:
         self._cmd = _clamp(filtered, -self.angle_limit, self.angle_limit)
         return self._cmd
 
+    def sync(self, angle):
+        """다른 제어기가 조향을 잡고 있는 동안 내부 상태를 그 값에 맞춰둔다.
+
+        라바콘 구간에서는 rubbercone_node 가 조향을 만든다. 그동안 이 제어기의
+        `_cmd` 를 0 인 채로 두면, 구간을 빠져나와 제어권이 돌아오는 순간
+        rate limit 이 0 에서부터 다시 올라가느라 실제 바퀴 각도와 어긋난다
+        (예: 콘 구간을 +30도로 빠져나왔는데 0도부터 시작).
+
+        미분항도 무효화한다 — 제어를 놓고 있던 동안의 오차 변화는 의미가 없다.
+        """
+        self._cmd = _clamp(float(angle), -self.angle_limit, self.angle_limit)
+        self._prev_err = None
+
     def hold(self, dt):
         """차선을 못 봤을 때 — 마지막 조향을 유지하되 서서히 중립으로 되돌린다.
 

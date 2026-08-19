@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'obstacle_node = my_obstacle.obstacle_node:main',
+            'rubbercone_node = my_obstacle.rubbercone_node:main',
         ],
     },
 )

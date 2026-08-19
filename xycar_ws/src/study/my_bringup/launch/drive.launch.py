@@ -120,6 +120,18 @@ def generate_launch_description():
         output='screen',
         parameters=[params_file],
     )
+    # --- 라바콘 구간 전담 (팀원 실차 검증 구현을 그대로 가져온 노드) ---
+    # 스스로 구간을 판정하고 조향·속도까지 만든다. driver_node 는 구간일 때
+    # 그 명령(/cone_cmd)을 그대로 통과시키기만 한다.
+    # drive_topic 을 xycar_motor 가 아니라 cone_cmd 로 돌리는 것이 핵심 —
+    # 모터 토픽에 발행자가 둘이 되면 서로 다른 명령이 섞여 차가 요동친다.
+    rubbercone = Node(
+        package='my_obstacle',
+        executable='rubbercone_node',
+        name='rubbercone_node',
+        output='screen',
+        parameters=[params_file],
+    )
     driver = Node(
         package='my_driver',
         executable='driver_node',
@@ -142,4 +154,4 @@ def generate_launch_description():
     )
 
     return LaunchDescription(args + [cam, lidar, motor, slam,
-                                     perception, obstacle, driver, viz])
+                                     perception, obstacle, rubbercone, driver, viz])

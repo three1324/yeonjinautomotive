@@ -175,6 +175,74 @@ obstacle_node:
       path_samples: 12      # [고정] /corridor_path 로 내보낼 중앙선 점 개수
 
 # ---------------------------------------------------------------------------
+#  라바콘 구간 전담 — 팀원이 실차에서 성공시킨 구현을 **그대로** 가져왔다
+#
+#  이 노드는 자족적이다: /scan 을 직접 받아 구간 판정부터 조향·속도까지 다 만든다.
+#  차선·카메라와 전혀 엮이지 않는다. driver_node 는 이 노드가 "구간이다"라고
+#  하면 그 명령(/cone_cmd)을 xycar_motor 로 **그대로 통과**시키기만 한다.
+#
+#  ⚠️ 코드는 검증된 원본 그대로다. 아래 값들은 원본 기본값이며, 바꾸려면
+#     실차에서 근거를 확인하고 바꿀 것. 특히 wheelbase_m / steer_gain 은
+#     원본 주석에 "실측 필요 / 실차 튜닝 필요"라고 적혀 있다.
+# ---------------------------------------------------------------------------
+rubbercone_node:
+  ros__parameters:
+    # ★ 가장 중요한 설정 — 모터 토픽에 직접 쏘지 않게 돌린다.
+    #   원본 기본값은 'xycar_motor' 였다(원본 주석: "decision_node 생기면 변경").
+    #   우리가 바로 그 decision_node 다. 이걸 안 바꾸면 driver_node 와 둘이
+    #   같은 토픽에 서로 다른 명령을 쏴서 차가 요동친다.
+    drive_topic: cone_cmd
+    zone_topic: /cone_zone_active   # driver_node 가 mux 판단에 쓴다
+    scan_topic: scan
+    debug_topic: /rubbercone/debug_image
+
+    angle_offset_deg: 0.0     # [실측필요] 라이다 장착 각도 보정
+
+    # --- 관심영역 (콘 탐색 범위) ---
+    forward_min: 0.15
+    forward_max: 2.5
+    max_angle_deg: 100.0
+
+    # --- 클러스터링 + 콘 판별 ---
+    cluster_gap_m: 0.15
+    cluster_min_points: 2
+    cluster_max_span_m: 0.4   # ★ 이보다 크면 벽/사람으로 보고 버린다 (콘은 작다)
+    cone_merge_dist_m: 0.25
+
+    # --- 좌우 콘 페어링 (핵심 목표점 생성) ---
+    pair_max_x_diff_m: 0.5    # 좌우 콘의 전후 거리 차가 이보다 크면 짝이 아님
+    min_gap_m: 0.5            # 좌우 간격이 이보다 좁으면 통과 불가로 보고 무시
+    single_side_offset_m: 0.35  # 한쪽만 보일 때 반대쪽으로 밀 양
+
+    # --- Pure Pursuit ---
+    wheelbase_m: 0.26         # [실측필요] 우리 차량 실측은 0.333m — 확인 후 맞출 것
+    lookahead_min_m: 0.3
+    steer_gain: 120.0         # [실차튜닝필요] rad -> angle 스케일
+    angle_limit: 50.0
+    invert_steer: false
+
+    # --- 목표점 안정화 (원본 주석: "실차에서 필요했던 안전장치") ---
+    target_smoothing_alpha: 0.5
+    max_target_step_m: 0.12
+
+    # --- 속도 ---
+    base_speed: 6.0
+    min_speed_ratio: 0.4      # 조향이 클수록 감속, 최소 이 배율까지
+    lost_speed_ratio: 0.7     # 콘을 못 찾아 FTG 폴백일 때 감속 배율
+
+    # --- Follow-the-Gap 폴백 (콘 페어를 못 찾았을 때) ---
+    car_width_m: 0.3
+    max_steering_angle_rad: 0.4
+
+    # --- 구간 진입/이탈 판정 (부채꼴 안 점밀도) ---
+    zone_near_m: 0.2
+    zone_far_m: 1.5
+    zone_half_angle_deg: 55.0
+    zone_point_threshold: 20  # 부채꼴 안 점이 이 개수 이상이면 dense
+    zone_enter_frames: 5      # dense 가 이만큼 연속되면 진입
+    zone_exit_frames: 5       # sparse 가 이만큼 연속되면 이탈
+
+# ---------------------------------------------------------------------------
 #  판단 + 제어
 # ---------------------------------------------------------------------------
 driver_node:
@@ -200,19 +268,14 @@ driver_node:
       auto_start: false
       # ↑ 신호등 없이 바로 주행. 실내 튜닝용. **실전에서는 반드시 false**
 
-    # --- 라바콘 구간 판정 — 라이다를 쓸 구간을 여기서 정한다 ---
-    # [2026-08-19 실차 결정] 라이다는 **라바콘 구간에서만** 쓴다.
-    # 판정 근거는 카메라(YOLO traffic_cone 개수)다 — 라이다를 언제 쓸지를
-    # 라이다로 정하면 순환이기 때문이다. 이 판정 하나를 fusion(복도 추종)과
-    # speed(전방 장애물 상한) 두 곳이 공유해서 켜지는 시점이 어긋나지 않게 한다.
-    cone_zone:
-      enter_n: 3              # [튜닝] 콘이 이 개수 이상 보이면 구간 진입
-      exit_n: 1               # [튜닝] 이 개수 이하로 떨어지면 이탈 후보
-      # ↑ enter > exit 로 두는 히스테리시스. 같게 두면 경계에서 켜졌다 꺼졌다
-      #   하면서 fusion 가중치가 방향을 바꿔 목표가 떨린다.
-      exit_hold_sec: 1.5      # [튜닝] 이탈 조건이 이 시간 유지돼야 실제로 이탈
-      # ↑ 구간을 빠져나올 때 마지막 콘이 시야에서 먼저 사라지는데 차체는 아직
-      #   콘 사이에 있다. 그 구간을 덮기 위한 유지시간.
+    # --- 라바콘 구간 mux ---
+    # 구간 판정과 주행은 rubbercone_node 가 전담한다(위 섹션). driver_node 는
+    # /cone_zone_active 가 true 이고 /cone_cmd 가 살아 있으면 그 명령을 그대로
+    # 통과시킨다. 아래는 "그 노드가 죽었다"고 볼 기준일 뿐이다.
+    cone_cmd_timeout_sec: 0.5
+    # ↑ [튜닝] rubbercone_node 는 /scan 주기(약 10Hz)로 발행하므로 5프레임 여유.
+    #   초과하면 차선 주행으로 비상 대체하고 로그에 경고를 남긴다.
+    #   너무 짧으면 라이다가 한 번 늦을 때마다 주행 주체가 바뀌어 불안정해진다.
 
     # --- 차선(카메라) <-> 콘 복도(라이다) 전환 ---
     # [2026-08-19] 두 센서를 **섞지 않는다. 구간에 따라 통째로 갈아탄다.**
