@@ -34,6 +34,13 @@ class Detections:
     # 라바콘
     cone_n: int = 0
     cone_near_y: float = 0.0  # 가장 가까운 콘의 bbox 하단 y (클수록 가깝다)
+    cone_max_h: float = 0.0
+    # ↑ 가장 큰 콘의 bbox 높이(px). **구간 진입 트리거의 거리 판단**에 쓴다.
+    #   왜 하단 y(cone_near_y)가 아니라 높이인가: 하단 y 는 카메라 피치와 노면
+    #   기울기에 흔들리고, 콘이 화면 아래로 잘리면 오히려 작아진다. bbox 높이는
+    #   거의 순수하게 거리의 함수라 "얼마나 가까운가"를 더 곧게 나타낸다.
+    #   멀리서 콘 무리가 보이자마자 구간으로 전환되면 아직 차선 구간인데
+    #   라이다 주행으로 넘어가므로, 개수와 **함께** 이 값으로 문턱을 만든다.
 
     # 방해차량
     car_present: bool = False
@@ -94,6 +101,7 @@ def extract(result, names, width, height, dashed_conf, solid_conf,
             if conf >= cone_conf:
                 det.cone_n += 1
                 det.cone_near_y = max(det.cone_near_y, y2)
+                det.cone_max_h = max(det.cone_max_h, y2 - y1)
         elif cls in CAR_NAMES:
             if conf >= car_conf and conf > det.car_conf:
                 det.car_present = True

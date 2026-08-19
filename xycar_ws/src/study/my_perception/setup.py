@@ -14,7 +14,10 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         # YOLO 가중치. 패키지와 함께 설치해야 런타임에 경로를 찾을 수 있다.
-        (os.path.join('share', package_name, 'models'), glob('models/*.pt')),
+        (os.path.join('share', package_name, 'models'),
+         glob('models/*.pt') + glob('models/*.engine')),
+        # ↑ .engine 은 이 보드에서 만든 TensorRT 엔진. git 에는 없고(.gitignore)
+        #   있는 보드에서만 설치된다. launch 의 _pick_model() 이 있으면 우선 쓴다.
     ],
     install_requires=['setuptools'],
     zip_safe=True,

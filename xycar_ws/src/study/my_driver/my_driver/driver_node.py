@@ -9,10 +9,10 @@
                라바콘 복도 중앙 (라이다). /lane 과 같은 형식·단위(픽셀)라
                그대로 섞을 수 있다. 섞는 정책은 fusion.py 참고.
     /light     Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT
-    /objects   Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y]
+    /objects   Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y, cone_max_h]
     /obstacle  Float32MultiArray [front_dist, left_free, right_free]
     /cone_cmd  Float32MultiArray [angle, speed]  라바콘 구간 전담 노드의 명령
-    /cone_zone_active Bool                       그 노드의 구간 판정
+    /cone_zone_active Bool                       그 노드의 구간 판정 (진단용, 제어 미사용)
 발행:
     xycar_motor Float32MultiArray [angle, speed]
     debug_state String            JSON. my_debug/pipeline_view_node 시각화 전용.
@@ -42,8 +42,15 @@
 것이다(콘 클러스터링 -> 좌우 페어링 -> Pure Pursuit, 실패 시 Follow-the-Gap).
 그 노드가 구간 판정부터 조향·속도까지 스스로 다 만든다.
 
-    rubbercone_node --/cone_zone_active--> 여기서 mux 판단
-                    --/cone_cmd---------> 구간이면 그대로 통과
+    perception(YOLO cone_n) --> cone_zone.ConeZoneDetector --> mux 판단
+    rubbercone_node         --/cone_cmd------------------------> 구간이면 그대로 통과
+
+★ 구간 판정만은 **카메라가 한다** (2026-08-19 2차 실차).
+  rubbercone_node 의 /cone_zone_active 는 전방 부채꼴 안 점 개수만 세고 콘
+  모양을 보지 않아서, 콘이 없는 곳의 벽·기둥에도 참이 됐다. 그러면 제어권이
+  통째로 라이다로 넘어가 차가 차선을 무시하고 달린다. 지금은 **콘 8개 이상 +
+  그 콘이 충분히 가까울 때** 진입하고 **2개 이하**면 이탈한다.
+  /cone_zone_active 는 진단 로그로만 남긴다.
 
 우리가 중간에서 손대면 검증된 동작이 깨지므로 **조향은 건드리지 않는다.**
 속도만 SpeedLimiter 를 통과시키는데, 알고리즘이 아니라 VESC 저전압 fault
@@ -63,6 +70,7 @@ from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
 from my_driver.control import SpeedLimiter, SteeringController
 from my_driver.fsm import DriveFSM, State
+from my_driver.cone_zone import ConeZoneDetector
 from my_driver.fusion import FusedResult, LateralFusion, LateralRef
 from my_driver.lateral import LateralPlanner, OvertakeBehavior
 from my_driver.longitudinal import LongitudinalPlanner
@@ -98,6 +106,7 @@ class Obs:
     car_cx: float = 0.0
     car_bottom_y: float = 0.0
 
+    cone_max_h: float = 0.0   # 가장 큰 콘 bbox 높이(px). 구간 진입 거리 판단용
     front_dist: float = 99.0
     left_free: float = 99.0
     right_free: float = 99.0
@@ -123,8 +132,16 @@ class DriverNode(Node):
                 ("fsm.start_confirm_frames", 5),
                 ("fsm.enable_shortcut", False),
                 ("fsm.auto_start", False),
-                # 라바콘 구간 — my_obstacle/rubbercone_node 가 판정·주행을 전담한다.
-                # 이 값은 그 노드의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
+                # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
+                # 판정을 라이다에 맡겼더니 콘이 없는 곳(벽·기둥)에서도 구간으로
+                # 잡혀 제어권이 넘어갔다 (2026-08-19 2차 실차). cone_zone.py 참고.
+                ("cone_zone.enter_n", 8),      # 콘 이 개수 이상 보이면 진입 후보
+                ("cone_zone.enter_min_size_px", 0.0),
+                # ↑ 그 콘이 **충분히 가까워야** 진입한다 (가장 큰 콘 bbox 높이).
+                #   개수만 보면 직선 끝에서 콘 무리가 보이자마자 전환된다.
+                ("cone_zone.exit_n", 2),       # 이 개수 이하로 떨어지면 이탈 후보
+                ("cone_zone.exit_hold_sec", 1.5),  # 이탈 후보가 이만큼 지속돼야 실제 이탈
+                # rubbercone_node 의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
                 # 그 노드는 /scan 주기(약 10Hz)로 발행하므로 0.5s 면 5프레임 여유.
                 ("cone_cmd_timeout_sec", 0.5),
                 # 차선 <-> 복도 전환 (구간에 따라 센서가 통째로 바뀐다)
@@ -180,6 +197,12 @@ class DriverNode(Node):
             start_confirm_frames=g("fsm.start_confirm_frames").value,
             enable_shortcut=g("fsm.enable_shortcut").value,
             auto_start=g("fsm.auto_start").value,
+        )
+        self.cone_zone = ConeZoneDetector(
+            enter_n=g("cone_zone.enter_n").value,
+            enter_min_size_px=g("cone_zone.enter_min_size_px").value,
+            exit_n=g("cone_zone.exit_n").value,
+            exit_hold_sec=g("cone_zone.exit_hold_sec").value,
         )
         self.cone_cmd_timeout = g("cone_cmd_timeout_sec").value
         self.fusion = LateralFusion(
@@ -242,6 +265,8 @@ class DriverNode(Node):
         # 라바콘 노드 mux 상태
         self._cone_cmd = (0.0, 0.0)      # (angle, speed)
         self._last_cone_cmd_time = None
+        # 라이다 쪽 구간 판정. **제어에는 쓰지 않는다** — 진단 비교용으로만
+        # 받아서 디버그에 싣는다 (카메라 판정과 어긋나는 빈도를 보려는 것).
         self._cone_zone_from_node = False
         self._last_source = "lane"        # 전환 로그를 한 번만 찍기 위한 기억
         self._last_tick = self.get_clock().now()
@@ -316,6 +341,10 @@ class DriverNode(Node):
         self.obs.car_present = msg.data[2] > 0.5
         self.obs.car_cx = msg.data[3]
         self.obs.car_bottom_y = msg.data[4]
+        # 콘 크기는 뒤에 붙은 확장 필드. 없으면 0.0 이라 크기 조건이 통과되지
+        # 않는다 — 옛 perception_node 와 섞어 쓰면 구간에 아예 못 들어간다.
+        if len(msg.data) >= 6:
+            self.obs.cone_max_h = msg.data[5]
 
     def on_obstacle(self, msg):
         if len(msg.data) < 3:
@@ -356,6 +385,15 @@ class DriverNode(Node):
         if dt <= 0.0:
             return
 
+        # 라바콘 구간 판정은 **주행 여부와 무관하게 항상 돌린다.**
+        # 아래의 조기 return 들(disabled / stale / 신호 대기) 뒤에 두면,
+        # /drive_enable 을 켜기 전에는 판정이 아예 안 돌아 벤치·영상 테스트에서
+        # cone_zone 이 영영 false 로 보인다. 실제로 그렇게 만들어 놓고 한참
+        # 헤맸다(2026-08-19). 판정은 순수한 관측이라 여기서 돌아도 안전하다 —
+        # 차를 움직이는 것은 아래 _drive_cone_zone() 뿐이다.
+        in_cone_zone = self.cone_zone.update(
+            dt, self.obs.cone_n, self.obs.cone_max_h)
+
         if not self._enabled:
             self._publish(0.0, 0.0)
             self._pub_debug(self.fsm.state.value, 0.0, 0.0, "disabled")
@@ -381,33 +419,37 @@ class DriverNode(Node):
             self._pub_debug(state.value, 0.0, 0.0, "wait")
             return
 
-        # ── 라바콘 구간이면 전담 노드에 통째로 넘긴다 (2026-08-19) ──
-        # rubbercone_node 는 팀원이 실차에서 검증한 구현이고, 구간 판정부터
-        # 조향·속도 산출까지 스스로 다 한다. 우리는 그 출력을 **그대로**
-        # xycar_motor 로 흘려보내기만 한다 — 중간에서 손대면 검증된 동작이 깨진다.
+        # ── 구간 판정은 카메라, 주행은 rubbercone_node (2026-08-19 2차 실차) ──
+        # "지금이 라바콘 구간인가"는 카메라가 정한다 — 콘 8개 이상이면서 가장 큰
+        # 콘이 충분히 가까우면(bbox 높이) 진입, 2개 이하면 이탈.
+        # 크기 조건이 없으면 직선 끝에서 콘 무리가 보이자마자 전환된다.
+        # 라이다 점밀도 판정은 콘이 없는 곳에서도 참이 돼서
+        # 제어권이 넘어갔다 — cone_zone.py 의 "왜 되살렸나" 참고.
+        # 구간 안에서의 조향·속도는 여전히 rubbercone_node 가 만든다. 그 출력은
+        # **그대로** 통과시킨다 — 중간에서 손대면 검증된 동작이 깨진다.
+        # (in_cone_zone 은 on_tick 맨 앞에서 이미 갱신했다 — 주행 여부와
+        #  무관하게 판정이 돌아야 하기 때문. 그 주석 참고.)
         cone_cmd_fresh = (
             self._last_cone_cmd_time is not None
             and (now - self._last_cone_cmd_time).nanoseconds / 1e9 <= self.cone_cmd_timeout
         )
-        if self._cone_zone_from_node and cone_cmd_fresh:
+        if in_cone_zone and cone_cmd_fresh:
             self._drive_cone_zone(dt, state)
             return
 
         if self._last_source != "lane":
-            if self._cone_zone_from_node:
+            if in_cone_zone:
                 # 구간이라는데 명령이 안 온다 = 그 노드가 죽었거나 라이다가 끊겼다.
                 # 조용히 차선 주행으로 돌아가면 콘을 칠 수 있으므로 경고를 남긴다.
                 self.get_logger().warn(
                     "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 차선 주행으로 비상 대체")
             else:
-                self.get_logger().info("CONE_ZONE 이탈 — 차선 주행으로 복귀")
+                self.get_logger().info(
+                    f"CONE_ZONE 이탈 — 차선 주행으로 복귀 ({self.cone_zone.last_reason})")
             self._last_source = "lane"
 
-        # 구간 판정은 rubbercone_node(라이다) 것을 그대로 쓴다. 카메라 콘 개수로
-        # 따로 판정하면 두 판정이 어긋나는 순간이 생긴다.
-        # 여기 도달했다는 건 "구간이 아니거나, 구간인데 그 노드가 죽었다"는 뜻이다.
-        # 후자면 아래 차선/복도 경로가 비상 대체로 동작한다.
-        in_cone_zone = self._cone_zone_from_node
+        # 여기 도달했다는 건 "구간이 아니거나, 구간인데 rubbercone_node 가
+        # 죽었다"는 뜻이다. 후자면 아래 차선/복도 경로가 비상 대체로 동작한다.
 
         # 차선(카메라)과 콘 복도(라이다)를 섞어 최종 횡방향 기준을 만든다.
         # 라바콘 구간에서는 콘 벽이 실제 주행 가능 경계이므로 복도 쪽 비중이 커진다.
@@ -491,7 +533,8 @@ class DriverNode(Node):
         self.steering.sync(angle)
 
         if self._last_source != "cone":
-            self.get_logger().info("CONE_ZONE — rubbercone_node 로 전환")
+            self.get_logger().info(
+                f"CONE_ZONE — rubbercone_node 로 전환 ({self.cone_zone.last_reason})")
             self._last_source = "cone"
 
         self._publish(angle, speed)
@@ -516,9 +559,16 @@ class DriverNode(Node):
             "light": LIGHT_NAME.get(self.obs.light, "?"),
             "front_dist": round(self.obs.front_dist, 2),
             "cone_n": self.obs.cone_n,
+            # 구간 진입 트리거의 거리 조건. cone_n 은 찼는데 이게 작아서 안
+            # 들어가는 상황을 화면에서 바로 구분하려면 같이 보여야 한다.
+            "cone_h": round(self.obs.cone_max_h, 0),
+            "zone_why": self.cone_zone.last_reason,
             # 라이다를 쓰고 있는 구간인지. 화면에서 바로 구분돼야 "지금 복도를
             # 따라가는 중인가, 차선을 따라가는 중인가"를 오해하지 않는다.
-            "cone_zone": bool(self._cone_zone_from_node),
+            "cone_zone": bool(self.cone_zone.active),
+            # 라이다 쪽 판정. 제어에는 안 쓰지만, 카메라 판정과 얼마나
+            # 어긋나는지 화면에서 바로 보이게 같이 싣는다.
+            "zone_lidar": bool(self._cone_zone_from_node),
             "overtake": ov,
             # 회피 기동의 근거를 그대로 노출한다. 화면만 보고 "왜 저쪽으로
             # 피했는가 / 왜 안 피하는가"를 알 수 있어야 튜닝이 가능하다.

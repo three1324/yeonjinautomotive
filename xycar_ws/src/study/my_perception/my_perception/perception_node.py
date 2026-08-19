@@ -11,7 +11,7 @@
              half_* 는 학습된 트랙 반폭(px). my_driver 가 회피 목표
              (트랙중앙 ± 반폭/2 = 트랙 반쪽의 중앙)를 만드는 데 쓴다. 0이면 미학습.
     /light   Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT (투표 확정값)
-    /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y]
+    /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y, cone_max_h]
     /debug_image Image         publish_debug_image=true 일 때만. YOLO 박스 + 차선 시각화
                  (my_debug/pipeline_view_node 전용, 기본 off — CPU 추론 병목 때문)
 
@@ -103,7 +103,13 @@ class PerceptionNode(Node):
         from ultralytics import YOLO
 
         self.get_logger().info(f"YOLO 모델 로드: {self.model_path}")
-        self.model = YOLO(self.model_path)
+        # task="segment" 를 **명시해야 한다.** .pt 는 파일 안에 태스크가 들어 있어
+        # 생략해도 되지만, TensorRT 엔진(.engine)은 생략하면 ultralytics 가
+        # detect 로 로드해 출력(1,46,8400)의 32개 마스크 계수를 클래스 점수로
+        # 오독한다 — 그러면 "클래스 24가 300개" 같은 쓰레기가 나오고 콘·차선이
+        # 하나도 안 잡힌다(2026-08-19 실제로 겪음). 차선은 마스크가 필요하므로
+        # 이 인자가 빠지면 주행 자체가 불가능하다.
+        self.model = YOLO(self.model_path, task="segment")
         self.names = self.model.names
         self.get_logger().info(f"클래스: {self.names}")
 
@@ -236,6 +242,10 @@ class PerceptionNode(Node):
             1.0 if det.car_present else 0.0,
             float(det.car_cx),
             float(det.car_bottom_y),
+            # [확장 필드] 가장 큰 콘의 bbox 높이(px). driver_node 가 라바콘 구간
+            # 진입 트리거의 "충분히 가까운가" 판단에 쓴다. 뒤에 붙였으므로
+            # 옛 driver_node 와 섞어 써도 길이 검사로 무시된다.
+            float(det.cone_max_h),
         ]))
 
         if self.publish_debug_image:

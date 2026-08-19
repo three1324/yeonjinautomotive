@@ -65,6 +65,46 @@ cd ~/xycar_ws && colcon build --symlink-install
 
 ---
 
+## 2-1. 젯슨 성능 설정 — **전원을 넣을 때마다** (2026-08-19 측정)
+
+```bash
+sudo nvpmodel -m 0     # MAXN_SUPER. 재부팅해도 유지된다
+sudo jetson_clocks     # 클럭 고정. ★ 재부팅하면 풀린다 — 매번 다시 할 것
+nvpmodel -q            # "NV Power Mode: MAXN_SUPER" 확인
+```
+
+perception_node 처리율 실측(시각화 없음, 같은 영상):
+
+| 조건 | fps |
+|---|---|
+| `.pt` + 40W | 12.4 |
+| `.engine` + 40W | 16.5 |
+| **`.engine` + MAXN** | **약 29** |
+
+**전력 모드가 TensorRT 보다 효과가 컸다** (+76% vs +33%). 40W 제한이 진짜
+병목이었다. 이걸 안 하면 인지가 12fps 로 떨어져 카메라 30fps 를 한참 못 따라가고,
+프레임이 실행마다 다르게 버려져 **같은 입력인데 결과가 달라진다.**
+
+⚠️ MAXN 은 전력 상한이 없다. 장시간 주행 시 `tegrastats` 로 스로틀링을 볼 것.
+   걸리면 25W/40W 로 내려도 `.pt` 보다는 빠르다.
+
+### TensorRT 엔진
+
+`my_perception/models/best5.engine` 이 있으면 launch 가 **자동으로** 그걸 쓴다
+(없으면 `.pt` 로 폴백). 엔진은 **이 보드에서 만든 것만 유효**하다 — git 에 없으므로
+보드를 바꾸거나 JetPack 을 올리면 다시 만든다:
+
+```bash
+cd ~/xycar_ws/src/study/my_perception
+python3 -c "from ultralytics import YOLO; \
+    YOLO('models/best5.pt').export(format='engine', half=True, imgsz=640, device=0)"
+cd ~/xycar_ws && colcon build --symlink-install --packages-select my_perception
+```
+
+`perception_node` 로그의 `YOLO 모델 로드: .../best5.engine` 로 확인한다.
+
+---
+
 ## 3. 센서만 먼저 (모터 없이)
 
 ```bash
@@ -133,22 +173,38 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
       발행자가 둘이 되어 서로 다른 명령이 섞이고 **차가 요동친다.**
       launch 로 띄우면 yaml 이 `cone_cmd` 로 돌려주므로 안전하다.
 
-- [ ] **라바콘 구간 전환 확인** (2026-08-19 mux 구조)
+- [ ] **라바콘 구간 전환 확인** (2026-08-19 2차 — 판정은 카메라, 주행은 라이다)
 
-      구간 판정과 주행은 `rubbercone_node` 가 전담하고, `driver_node` 는
-      구간일 때 그 명령을 그대로 통과시킨다.
+      **구간 판정은 `driver_node` 가 카메라로 한다** — 콘 8개 이상이면서 가장 큰
+      콘의 bbox 높이가 `enter_min_size_px` 이상이어야 진입하고, 2개 이하가
+      1.5초 지속되면 이탈한다. 크기 조건이 있는 이유는 콘이 줄지어 서 있어
+      **직선 끝에서도 8~13개가 한꺼번에 보이기 때문**이다 — 개수만 보면 구간에
+      닿기 전에 전환된다. 구간 안에서의 조향·속도만
+      `rubbercone_node` 명령을 그대로 통과시킨다.
+
+      1차 실차에서는 판정도 `rubbercone_node`(/cone_zone_active)가 했는데,
+      콘이 없는 곳의 벽·기둥에도 true 가 떠서 제어권이 라이다로 넘어가
+      **차가 차선을 무시하고 이상하게 달렸다.** 그 판정은 전방 부채꼴 안
+      원본 스캔점 개수만 세고 콘 모양을 보지 않는다.
 
       ```bash
-      ros2 topic echo /cone_zone_active     # 콘 앞에서 true 로 바뀌는지
+      ros2 topic echo /debug_state          # cone_zone(카메라 판정) 과
+                                            # zone_lidar(라이다 판정) 를 같이 본다
+      ros2 topic echo /cone_zone_active     # = zone_lidar. 이제 제어에 안 쓴다
       ros2 topic hz   /cone_cmd             # 약 10Hz (스캔 주기) 로 나오는지
       ```
+
+      ★ **콘이 없는 직선/곡선에서 `zone_lidar: true` 인데 `cone_zone: false`**
+      라면 정상이다 — 라이다 오판정을 카메라가 막고 있다는 뜻이다. 반대로
+      콘 구간인데 `cone_zone` 이 안 켜지면 YOLO 콘 검출부터 볼 것
+      (`/objects` 의 cone_n, `debug_state` 의 `cone_n`).
 
       `driver_node` 로그에서 전환을 확인:
 
       ```
-      [INFO] CONE_ZONE — rubbercone_node 로 전환
+      [INFO] CONE_ZONE — rubbercone_node 로 전환 (enter(cone 3))
       [LANE_DRIVE] ... | cone_zone(rubbercone)     <- 라이다가 몰고 있음
-      [INFO] CONE_ZONE 이탈 — 차선 주행으로 복귀
+      [INFO] CONE_ZONE 이탈 — 차선 주행으로 복귀 (exit(cone 0, 1.5s))
       ```
 
       ⚠️ `CONE_ZONE 인데 /cone_cmd 가 끊겼다` 경고가 뜨면 라이다나 그 노드가

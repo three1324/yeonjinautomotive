@@ -37,12 +37,30 @@ from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
+def _pick_model(perception_share):
+    """TensorRT 엔진이 있으면 그것을, 없으면 PyTorch 가중치를 쓴다.
+
+    엔진(.engine)은 **이 젯슨에서 만든 것만 유효하다** — TensorRT/JetPack 버전과
+    GPU 아키텍처에 종속이라 다른 보드로 옮기면 로드에 실패한다. 그래서 git 에
+    올리지 않고(.gitignore), 보드마다 한 번씩 만든다:
+
+        cd my_perception && python3 -c "from ultralytics import YOLO; \
+            YOLO('models/best5.pt').export(format='engine', half=True, imgsz=640, device=0)"
+
+    엔진이 없으면 자동으로 .pt 로 떨어지므로, 변환을 안 한 보드에서도 그냥 돈다.
+    """
+    engine = os.path.join(perception_share, 'models', 'best5.engine')
+    if os.path.exists(engine):
+        return engine
+    return os.path.join(perception_share, 'models', 'best5.pt')
+
+
 def generate_launch_description():
     bringup_share = get_package_share_directory('my_bringup')
     perception_share = get_package_share_directory('my_perception')
 
     default_params = os.path.join(bringup_share, 'config', 'drive_params.yaml')
-    default_model = os.path.join(perception_share, 'models', 'best5.pt')
+    default_model = _pick_model(perception_share)
 
     params_file = LaunchConfiguration('params_file')
     use_sensors = LaunchConfiguration('sensors')
