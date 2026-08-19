@@ -71,9 +71,9 @@ desktop.ini
 # my_driver/tools/pipeline_sim.py 로 만든 단계별 시각화 영상 (수십MB, 다시 만들면 그만)
 reference/videos/pipeline_out/
 
-# ── TensorRT 엔진 ───────────────────────────────────────────────────────
-# best5.pt 에서 보드마다 새로 만드는 산출물이다(수십 MB). TensorRT/JetPack
-# 버전과 GPU 아키텍처에 종속이라 다른 보드로 옮기면 로드조차 안 된다.
-# 만드는 법은 launch 파일의 _pick_model() docstring 참고.
-*.engine
+# ── TensorRT 중간 산출물 ────────────────────────────────────────────────
+# .onnx 는 .pt -> .engine 변환 과정의 중간 파일이라 보관 가치가 없다.
+# (.engine 자체는 커밋한다 — 젯슨에서 바로 쓰려고 일부러 올린다.
+#  단 보드/JetPack 이 바뀌면 로드가 안 되니 그때는 다시 만들 것.
+#  만드는 법은 VEHICLE_TEST.md §2-1 참고.)
 *.onnx
