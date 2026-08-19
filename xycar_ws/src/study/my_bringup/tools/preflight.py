@@ -50,8 +50,11 @@ REQUIRED_PKGS = [
     "my_perception", "my_obstacle", "my_driver", "my_bringup", "my_debug",
     "xycar_cam", "xycar_lidar",
 ]
-# 젯슨 전용 (AMD 차량은 모터가 별도 ROS1 도커라 없어도 된다)
-JETSON_PKGS = ["xycar_motor", "vesc_driver"]
+# 모터는 두 차량 모두 ROS1 도커(ros1_container + ros1_bridge)가 담당한다.
+# ROS2 판 xycar_motor / vesc_driver 는 쓰지 않는다 — 동시에 띄우면 /dev/ttyMOTOR 를
+# 두 프로세스가 잡으려 해서 충돌한다. 근거: JETSON_ROS1_DOCKER_MOTOR.md §8-(3).
+ROS1_MOTOR_IMAGE = "osrf/ros:noetic-xycar"
+ROS1_MOTOR_CONTAINER = "ros1_container"
 
 _results = []
 
@@ -102,12 +105,16 @@ def check_env():
     else:
         _mark("PASS", "필수 패키지 빌드", f"{len(REQUIRED_PKGS)}개 모두 있음")
 
-    missing_j = [p for p in JETSON_PKGS if p not in built]
-    if missing_j:
-        _mark("WARN", "모터 스택(젯슨용)", "빠짐: " + ", ".join(missing_j),
-              "젯슨 차량이면 빌드할 것. AMD 차량은 모터가 별도 ROS1 도커이므로 정상이다")
+    # ROS2 판 모터 패키지는 안 쓴다. 오히려 **빌드돼 있으면** 실수로 같이 띄울 위험이
+    # 있으므로 그쪽을 경고한다 (포트 충돌 — JETSON_ROS1_DOCKER_MOTOR.md §8-(3)).
+    stray = [p for p in ("xycar_motor", "vesc_driver") if p in built]
+    if stray:
+        _mark("WARN", "ROS2 판 모터 패키지", "빌드돼 있음: " + ", ".join(stray),
+              "모터는 ROS1 도커가 담당한다. 이 패키지들을 같이 띄우면 /dev/ttyMOTOR 가\n"
+              "충돌한다. drive.launch.py 는 motor:=false 가 기본이므로 그대로 두면 된다.\n"
+              "확인:  ros2 node list | grep -E 'vesc|xycar_motor'  (도커 쪽만 보여야 한다)")
     else:
-        _mark("PASS", "모터 스택(젯슨용)", "빌드됨")
+        _mark("PASS", "ROS2 판 모터 패키지", "없음 (정상 — 모터는 ROS1 도커가 담당)")
 
     # 소스가 install 보다 새로우면 옛 코드가 도는 것이다 (--symlink-install 이라도
     # entry_point/launch/config 추가는 재빌드가 필요하다).
@@ -265,18 +272,66 @@ def check_hardware():
                       "  확인:  ros2 launch xycar_lidar xycar_lidar.launch.py  로그에\n"
                       "        'Unknown error' 가 뜨면 아직 포트를 못 연 것이다")
 
-    # --- vesc.yaml 의 port 가 실제로 존재하는가 ---
-    vesc = os.path.join(WS, "src", "xycar_motor", "config", "vesc.yaml")
-    if os.path.exists(vesc):
-        m = re.search(r"^\s*port:\s*(\S+)", open(vesc, encoding="utf-8").read(), re.M)
-        if m:
-            port = m.group(1)
-            if os.path.exists(port):
-                _mark("PASS", "vesc.yaml port", f"{port} (존재)")
-            else:
-                _mark("FAIL", "vesc.yaml port", f"{port} 가 존재하지 않는다",
-                      f"vesc_driver 가 이 경로를 못 열면 모터가 안 돈다.\n"
-                      f"실제 경로를 ls -l /dev/tty* 로 확인해 {vesc} 를 고칠 것")
+    check_ros1_motor()
+
+
+# ------------------------------------------------------- 3-1. ROS1 도커 모터 스택
+
+def check_ros1_motor():
+    """모터는 ROS1 도커가 담당한다. 이미지·컨테이너·브릿지가 준비돼 있는지 본다.
+
+    절차 전문은 JETSON_ROS1_DOCKER_MOTOR.md. 기동은 ~/xycar_ws/etc/motor_vesc/motor.
+    """
+    _section("3-1. 모터 스택 (ROS1 도커)")
+
+    if not shutil.which("docker"):
+        _mark("FAIL", "docker", "설치돼 있지 않다",
+              "모터가 ROS1 도커로 돈다. JetPack 기본 포함이므로 없으면 설치할 것")
+        return
+
+    img = subprocess.run(["docker", "images", "-q", ROS1_MOTOR_IMAGE],
+                         capture_output=True, text=True)
+    if img.stdout.strip():
+        _mark("PASS", "도커 이미지", ROS1_MOTOR_IMAGE)
+    else:
+        _mark("FAIL", "도커 이미지", f"{ROS1_MOTOR_IMAGE} 없음",
+              "JETSON_ROS1_DOCKER_MOTOR.md §6 Step 1 로 arm64 이미지를 만들 것")
+
+    ps = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"name=^{ROS1_MOTOR_CONTAINER}$",
+         "--format", "{{.Status}}"], capture_output=True, text=True)
+    status = ps.stdout.strip()
+    if status.startswith("Up"):
+        _mark("PASS", "ros1_container", status)
+    elif status:
+        _mark("WARN", "ros1_container", f"떠 있지 않음 ({status})",
+              "모터를 쓰려면 기동할 것:  ~/xycar_ws/etc/motor_vesc/motor")
+    else:
+        _mark("WARN", "ros1_container", "컨테이너가 없음",
+              "모터를 쓰려면 기동할 것:  ~/xycar_ws/etc/motor_vesc/motor")
+
+    # ros1_bridge — 이게 없으면 ROS2 가 발행한 /xycar_motor 가 컨테이너에 안 넘어간다.
+    devel = os.path.expanduser("~/noetic_ws/devel/setup.bash")
+    if os.path.exists(devel):
+        _mark("PASS", "noetic_ws 빌드", devel)
+    else:
+        _mark("FAIL", "noetic_ws 빌드", "~/noetic_ws/devel 이 없다",
+              "JETSON_ROS1_DOCKER_MOTOR.md §6 Step 2 로 컨테이너 안에서 catkin_make 할 것")
+
+    bridge = os.path.expanduser("~/ros-humble-ros1-bridge/install/local_setup.bash")
+    if os.path.exists(bridge):
+        _mark("PASS", "ros1_bridge 빌드", bridge)
+    else:
+        _mark("FAIL", "ros1_bridge 빌드", "~/ros-humble-ros1-bridge/install 이 없다",
+              "JETSON_ROS1_DOCKER_MOTOR.md §6 Step 3 로 빌드할 것.\n"
+              "이게 없으면 ROS2 의 /xycar_motor 가 컨테이너 안으로 전달되지 않는다")
+
+    running = subprocess.run(["pgrep", "-f", "ros1_bridge"], capture_output=True)
+    if running.returncode == 0:
+        _mark("PASS", "ros1_bridge 실행", "동작 중")
+    else:
+        _mark("WARN", "ros1_bridge 실행", "떠 있지 않음",
+              "모터를 쓰려면 기동할 것:  ~/xycar_ws/etc/motor_vesc/motor")
 
 
 # ----------------------------------------------------------------- 4. 파라미터

@@ -5,7 +5,10 @@
 인자:
     params_file   파라미터 yaml 경로 (기본: my_bringup/config/drive_params.yaml)
     sensors       센서 드라이버(카메라/라이다)도 같이 띄울지 (기본 true)
-    motor         모터 스택(vesc + xycar_motor)도 같이 띄울지 (기본 true)
+    motor         ROS2 판 모터 스택(vesc + xycar_motor)도 같이 띄울지 (기본 false)
+                  ⚠️ 이 차량의 모터는 ROS1 도커(ros1_container + ros1_bridge)가 담당한다.
+                  ROS2 판은 쓰지 않는다 — 동시에 띄우면 /dev/ttyMOTOR 를 두 프로세스가
+                  잡으려 해서 충돌한다. 근거: JETSON_ROS1_DOCKER_MOTOR.md §8-(3)
     slam          SLAM 측위를 같이 띄울지 (기본 false — 1단계에서는 불필요)
 
     debug            OpenCV 파이프라인 뷰어(카메라 시점)를 띄울지 (기본 false)
@@ -53,7 +56,7 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument('params_file', default_value=default_params),
         DeclareLaunchArgument('sensors', default_value='true'),
-        DeclareLaunchArgument('motor', default_value='true'),
+        DeclareLaunchArgument('motor', default_value='false'),
         DeclareLaunchArgument('slam', default_value='false'),
         # true 로 켜면 perception_node 가 /debug_image 를 내고 my_debug 뷰어 창이 뜬다.
         DeclareLaunchArgument('debug', default_value='false'),
@@ -74,7 +77,8 @@ def generate_launch_description():
         condition=IfCondition(use_sensors),
     )
 
-    # --- 모터 스택 (vesc_driver + ackermann_to_vesc + vesc_to_odom + xycar_motor) ---
+    # --- ROS2 판 모터 스택 (기본 꺼짐) ---
+    # 이 차량의 모터는 ROS1 도커가 잡는다(§8-(3)). 여기를 켜면 포트가 충돌한다.
     motor = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution(
             [FindPackageShare('xycar_motor'), 'launch', 'xycar_motor.launch.py'])),
