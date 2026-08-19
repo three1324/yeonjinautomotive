@@ -16,20 +16,20 @@ ROS 의존성 없음 (표준 라이브러리만). 오프라인 검증 가능.
 픽셀 점프한다. 그 점프가 그대로 조향에 실려 차가 휘청인다.
 그래서 가중치를 두고 **시간에 걸쳐 서서히** 옮긴다.
 
-가중치 결정:
-    라바콘 구간 밖 -> **가중치 0. 라이다를 아예 쓰지 않는다** (아래 참고)
-    콘 개수      -> 복도 쪽 목표 가중치 (콘이 많을수록 복도를 믿는다)
-    각자 quality -> 신뢰도가 낮은 쪽 비중을 깎는다
-    한쪽이 invalid -> 나머지 하나를 그대로 쓴다
-    둘 다 invalid  -> 결과도 invalid (driver 가 hold/정지 판단)
+가중치 결정 — 구간에 따라 **센서가 통째로 바뀐다** (2026-08-19 실차 결정)
 
-────────────────────────────────────────────────────────────────────────
-라바콘 구간 밖에서는 라이다를 쓰지 않는다 (2026-08-19 실차 결정)
+    라바콘 구간 밖  -> 가중치 0.  차선(카메라) 단독. 라이다 간섭 없음.
+    라바콘 구간 안  -> 가중치 1.  복도(라이다) 단독. 차선을 섞지 않음.
+    둘 다 invalid   -> 결과도 invalid (driver 가 hold/정지 판단)
 
-콘 개수로 가중치를 깎는 것만으로는 부족했다. "차선을 놓치면 복도 100%"
-규칙이 콘과 무관한 구간에서도 발동해, 차선을 잠깐 놓칠 때마다 라이다가
-잡은 벽·기둥·관중을 주행 기준으로 삼았다. 구간 판정(cone_zone.py)을
-하드 게이트로 앞에 두어 이 경로 자체를 막는다.
+목표 가중치는 0 아니면 1 이다. 0.5 같은 중간값은 **전환 중에만** 나타나며,
+그것도 아래 rate limit 때문에 생기는 과도값이지 의도된 혼합이 아니다.
+
+왜 혼합을 그만뒀나: 콘 구간에서는 콘 벽이 실제 주행 가능 경계이고 페인트
+차선은 그것과 **어긋나 있다**(우측 콘 벽이 흰 실선보다 안쪽). 차선을 10%만
+섞어도 목표가 콘 쪽으로 밀려 접촉 위험이 생긴다. 반대로 콘 구간 밖에서는
+라이다가 트랙 밖 벽·기둥·관중을 잡아 엉뚱한 곳을 가리킨다. 두 센서는
+각자의 구간에서만 옳으므로, 섞지 말고 갈아타는 것이 맞다.
 
 가중치 자체도 초당 변화율을 제한해서 튀지 않게 한다.
 """
@@ -53,30 +53,17 @@ class FusedResult(LateralRef):
     source: str = "none"           # "lane" | "corridor" | "blend" | "none"
 
 
-def _lerp01(x, lo, hi):
-    """x 가 lo->hi 로 갈 때 0->1. 범위 밖은 클램프."""
-    if hi <= lo:
-        return 1.0 if x >= hi else 0.0
-    return max(0.0, min(1.0, (x - lo) / (hi - lo)))
-
-
 class LateralFusion:
 
     def __init__(
         self,
-        cone_n_lo=2.0,          # 콘이 이 개수 이하면 복도를 쓰지 않는다
-        cone_n_hi=6.0,          # 이 개수 이상이면 복도 비중 최대
-        max_corridor_weight=0.9,
-        # ↑ 1.0 으로 두지 않는 이유: 콘 구간에서도 차선이 보이면 그 정보를 조금은
-        #   남겨둔다. 라이다 복도만 100% 믿으면 콘이 순간적으로 안 잡힐 때 크게 튄다.
         weight_rate_per_sec=1.5,
         # ↑ 가중치가 0->1 로 가는 데 최소 1/1.5 = 0.67초. 전환 점프를 막는다.
+        #   목표 가중치는 0 아니면 1 이므로, 전환의 부드러움은 **전적으로**
+        #   이 값이 결정한다.
         min_corridor_quality=0.4,
-        # ↑ 복도 신뢰도가 이보다 낮으면 아예 섞지 않는다
+        # ↑ 복도 신뢰도가 이보다 낮으면 복도를 못 만든 것으로 본다
     ):
-        self.cone_n_lo = cone_n_lo
-        self.cone_n_hi = cone_n_hi
-        self.max_corridor_weight = max_corridor_weight
         self.weight_rate_per_sec = weight_rate_per_sec
         self.min_corridor_quality = min_corridor_quality
 
@@ -92,39 +79,35 @@ class LateralFusion:
     def corridor_weight(self):
         return self._w
 
-    def _target_weight(self, lane, corridor, cone_n, cone_zone):
-        """이번 프레임이 원하는 복도 가중치 (아직 rate limit 적용 전)."""
-        # 라바콘 구간 밖에서는 라이다를 아예 쓰지 않는다 (2026-08-19 결정).
-        # cone_n 임계만으로 가중치를 깎는 것으로는 부족했다 — 아래 "차선 소실 ->
-        # 복도 100%" 규칙이 콘과 무관한 곳에서도 발동해, 차선을 잠깐 놓칠 때마다
-        # 라이다가 잡은 벽·기둥을 주행 기준으로 삼아버렸다.
+    def _target_weight(self, lane, corridor, cone_zone):
+        """이번 프레임이 원하는 복도 가중치 (아직 rate limit 적용 전).
+
+        값은 사실상 0 또는 1 이다 — 구간에 따라 **어느 센서로 달릴지**가
+        완전히 갈리기 때문이다. 중간값은 전환 중에만 rate limit 때문에 생긴다.
+        """
+        # 라바콘 구간 밖: 라이다 간섭 0. 차선만으로 달린다.
         if not cone_zone:
             return 0.0
 
         corridor_ok = corridor.valid and corridor.quality >= self.min_corridor_quality
-
         if not corridor_ok:
+            # 콘 구간인데 복도를 못 만들었다 = 라이다 쪽 실패.
+            # 차선으로 되돌아가는 것은 **설계 의도가 아니라 비상 폴백**이다.
+            # 콘 구간 한가운데서 멈추는 것보다는 낫다는 판단이고, 실제로는
+            # 복도가 한두 프레임 끊기는 정도라 rate limit 이 덮어준다.
+            # 자주 뜨면 obstacle_node 의 복도 추정 파라미터를 봐야 한다.
             return 0.0
-        if not lane.valid:
-            # 콘 구간 안에서 차선을 못 보는데 복도는 보인다 -> 복도에 전적으로 의존
-            return 1.0
 
-        # 콘이 많을수록 복도를 믿는다
-        w = _lerp01(cone_n, self.cone_n_lo, self.cone_n_hi) * self.max_corridor_weight
-        # 양쪽 신뢰도 차이를 반영 — 복도가 흐릿하면 덜 믿는다
-        total = lane.quality + corridor.quality
-        if total > 1e-6:
-            w *= corridor.quality / total * 2.0     # 동률이면 1.0 배
-            w = min(w, self.max_corridor_weight)
-        return w
+        # 라바콘 구간 = 복도 단독 주행. 차선을 섞지 않는다.
+        return 1.0
 
-    def update(self, dt, lane, corridor, cone_n, cone_zone=False):
+    def update(self, dt, lane, corridor, cone_zone=False):
         """프레임당 1회. lane/corridor 는 LateralRef 호환 객체.
 
         cone_zone: 지금이 라바콘 구간인가 (cone_zone.ConeZoneDetector 판정).
-                   False 면 복도(라이다)를 아예 섞지 않는다.
+                   True 면 복도 단독, False 면 차선 단독.
         """
-        target = self._target_weight(lane, corridor, cone_n, cone_zone)
+        target = self._target_weight(lane, corridor, cone_zone)
 
         # 가중치 변화율 제한 — 전환 시 목표가 점프하지 않게
         step = self.weight_rate_per_sec * max(dt, 1e-3)

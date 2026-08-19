@@ -50,7 +50,7 @@ def run(name, steps, expect_corridor=None, **kw):
     for label, n, lane, cor, cone in steps:
         for i in range(n):
             in_zone = zone.update(DT, cone)
-            r = fus.update(DT, lane, cor, cone, cone_zone=in_zone)
+            r = fus.update(DT, lane, cor, cone_zone=in_zone)
             if prev is not None and r.valid:
                 j = abs(r.offset_near - prev)
                 if j > max_jump:
@@ -135,9 +135,9 @@ r = run(
 fus = LateralFusion()
 zone = ConeZoneDetector()
 for _ in range(30):
-    fus.update(DT, LANE_OK, COR_OK, 0, cone_zone=zone.update(DT, 0))
+    fus.update(DT, LANE_OK, COR_OK, cone_zone=zone.update(DT, 0))
 for _ in range(60):
-    last = fus.update(DT, NONE, COR_LOWQ, 8, cone_zone=zone.update(DT, 8))
+    last = fus.update(DT, NONE, COR_LOWQ, cone_zone=zone.update(DT, 8))
 print(f"  -> valid={last.valid} (False 여야 함)   "
       f"{'OK' if not last.valid else '틀림'}")
 ok.append(r and not last.valid)
@@ -150,7 +150,7 @@ for rate in (0.5, 1.5, 5.0, 30.0):
     prev, mx = None, 0.0
     for i in range(120):
         cone = 0 if i < 30 else 8
-        r = fus.update(DT, LANE_OK, COR_OK, cone, cone_zone=zone.update(DT, cone))
+        r = fus.update(DT, LANE_OK, COR_OK, cone_zone=zone.update(DT, cone))
         if prev is not None:
             mx = max(mx, abs(r.offset_near - prev))
         prev = r.offset_near

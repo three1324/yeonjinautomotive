@@ -113,10 +113,7 @@ class DriverNode(Node):
                 ("cone_zone.enter_n", 3),
                 ("cone_zone.exit_n", 1),
                 ("cone_zone.exit_hold_sec", 1.5),
-                # 차선 <-> 복도 융합 (라바콘 구간에서만 동작)
-                ("fusion.cone_n_lo", 2.0),
-                ("fusion.cone_n_hi", 6.0),
-                ("fusion.max_corridor_weight", 0.9),
+                # 차선 <-> 복도 전환 (구간에 따라 센서가 통째로 바뀐다)
                 ("fusion.weight_rate_per_sec", 1.5),
                 ("fusion.min_corridor_quality", 0.4),
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
@@ -177,9 +174,6 @@ class DriverNode(Node):
             exit_hold_sec=g("cone_zone.exit_hold_sec").value,
         )
         self.fusion = LateralFusion(
-            cone_n_lo=g("fusion.cone_n_lo").value,
-            cone_n_hi=g("fusion.cone_n_hi").value,
-            max_corridor_weight=g("fusion.max_corridor_weight").value,
             weight_rate_per_sec=g("fusion.weight_rate_per_sec").value,
             min_corridor_quality=g("fusion.min_corridor_quality").value,
         )
@@ -381,7 +375,6 @@ class DriverNode(Node):
                        self.obs.lane_valid, self.obs.quality),
             LateralRef(self.obs.cor_near, self.obs.cor_far,
                        self.obs.cor_valid and cor_fresh, self.obs.cor_quality),
-            self.obs.cone_n,
             cone_zone=in_cone_zone,
         )
         self._ref = ref
