@@ -71,9 +71,19 @@ def generate_launch_description():
             [FindPackageShare('xycar_cam'), 'launch', 'xycar_cam.launch.py'])),
         condition=IfCondition(use_sensors),
     )
+    # ⚠️ xycar_lidar.launch.py 도 'params_file' 이라는 같은 이름의 인자를 선언한다.
+    #    이미 위에서 우리가 params_file 을 선언해 두었으므로, include 쪽
+    #    DeclareLaunchArgument 의 기본값(ydlidar.yaml)은 무시되고 drive_params.yaml
+    #    이 그대로 넘어간다. 거기엔 xycar_lidar_node 항목이 없어서 노드가
+    #    컴파일 기본값(/dev/ydlidar, 230400)으로 뜨고 "cannot bind to the specified
+    #    serial port" 로 죽는다. 그래서 여기서 라이다 yaml 을 명시적으로 못박는다.
     lidar = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution(
             [FindPackageShare('xycar_lidar'), 'launch', 'xycar_lidar.launch.py'])),
+        launch_arguments={
+            'params_file': PathJoinSubstitution(
+                [FindPackageShare('xycar_lidar'), 'params', 'ydlidar.yaml']),
+        }.items(),
         condition=IfCondition(use_sensors),
     )
 
