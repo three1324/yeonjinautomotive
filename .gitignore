@@ -16,6 +16,11 @@ amd.zip
 build/
 install/
 log/
+# 단, 벤더 패키지 안의 log/ 는 빌드 산출물이 아니라 원본 구성요소다.
+# 위 log/ 규칙이 경로 어디서든 매칭돼서 이것까지 삼켜버린다. 빈 디렉토리라
+# .gitkeep 이 필요한데 그것마저 무시되면, 젯슨에서 colcon 이
+# ament_cmake_symlink_install_directory() 대상 폴더를 못 찾아 빌드가 실패한다.
+!**/xycar_ultrasonic/log/
 
 # YDLidar SDK 자체 빌드 산출물 (22MB, 위와 같은 이유)
 **/YDLidar-SDK/build/
