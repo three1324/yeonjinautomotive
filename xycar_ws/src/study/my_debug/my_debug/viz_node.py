@@ -52,13 +52,11 @@ from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
 
-# 지금 어느 기준을 따르는지 (fusion.py 의 source) -> 색.
-_SOURCE_COLOR = {
-    "lane": (1.0, 1.0, 0.2),       # 노랑 — 카메라 차선
-    "blend": (1.0, 0.6, 0.1),      # 주황 — 섞는 중 (전환 구간)
-    "corridor": (1.0, 0.2, 0.2),   # 빨강 — 라이다 콘 복도
-    "none": (0.5, 0.5, 0.5),
-}
+# 지금 누가 차를 몰고 있는지 -> 색. (driver_node 의 debug_state.cone_zone)
+# 숫자보다 색이 먼저 눈에 들어온다 — 콘 구간 진입/이탈이 한눈에 보여야
+# 튜닝 중 판단이 빨라진다.
+_LANE_COLOR = (1.0, 1.0, 0.2)      # 노랑 — 카메라 차선 (driver_node)
+_CONE_COLOR = (1.0, 0.2, 0.2)      # 빨강 — 라이다 (rubbercone_node)
 
 
 def _yaw_to_quat(yaw):
@@ -372,9 +370,9 @@ class VizNode(Node):
             text.text = (
                 f"{s.get('state', '?')}  angle={s.get('angle', 0):+.1f} "
                 f"speed={s.get('speed', 0):.1f}\n"
-                f"ref[{s.get('source', '-')}] w={s.get('corridor_weight', 0):.2f} "
+                f"{'CONE(lidar)' if s.get('cone_zone') else 'LANE(cam)'} "
                 f"{'OK' if s.get('valid') else 'HOLD'}\n"
-                f"light={s.get('light', '?')} front={s.get('front_dist', 0):.2f}m "
+                f"light={s.get('light', '?')} "
                 f"cone={s.get('cone_n', 0)}\n"
                 + (f"AVOID {'RIGHT' if s.get('ot_dir', 0) > 0 else 'LEFT'} "
                    f"{s.get('ot_amount', 0):.0f}px "
@@ -418,8 +416,8 @@ class VizNode(Node):
                             frame=(self._corridor_path.header.frame_id
                                    if self._corridor_path else None))
         mode.scale.x = 0.04
-        src = (s or {}).get("source", "none")
-        r, g, b = _SOURCE_COLOR.get(src, (0.5, 0.5, 0.5))
+        r, g, b = (_CONE_COLOR if (s or {}).get("cone_zone")
+                   else _LANE_COLOR)
         mode.color.r, mode.color.g, mode.color.b = r, g, b
         if self._corridor_path is not None:
             for pose in self._corridor_path.poses:

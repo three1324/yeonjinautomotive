@@ -57,9 +57,7 @@ class Obs:
         self.car_present = False
         self.car_cx = 0.0
         self.car_bottom_y = 0.0
-        self.front_dist = 99.0
-        self.left_free = 99.0
-        self.right_free = 99.0
+        # 라이다 필드는 없다 — 회피도 종방향도 카메라만 쓴다 (2026-08-21).
 
 
 def make_controllers(a):
@@ -73,7 +71,6 @@ def make_controllers(a):
         curve_px_lo=30.0, curve_px_hi=150.0, curve_factor_min=0.45,
         quality_lo=0.4, quality_factor_min=0.5,
         cone_n_lo=2.0, cone_n_hi=8.0, cone_factor_min=0.6,
-        stop_dist=0.35, slow_dist=1.2,
     )
     lateral = LateralPlanner(
         OvertakeBehavior(shift_px=120.0, trigger_bottom_y=300.0,
@@ -104,17 +101,15 @@ def run(a, offset0, curvature, duration, lane_lost=(), car_at=None, label=""):
             obs.car_present = True
             obs.car_cx = 200.0       # 화면 왼쪽에 차량 -> 오른쪽으로 피해야 함
             obs.car_bottom_y = 350.0
-            obs.front_dist = 1.2
         else:
             obs.car_present = False
-            obs.front_dist = 99.0
 
         offset_far = offset - heading_err * LOOKAHEAD + curvature * CURVE_LOOK
 
         target_offset = lateral.update(dt, obs, image_width=632)
         target_speed = longitudinal.update(
             lane_valid, offset, offset_far, 1.0 if lane_valid else 0.0,
-            0, obs.front_dist)
+            0, overtake_active=lateral.overtake.active)
         v = speed_lim.update(dt, target_speed)
 
         if lane_valid:

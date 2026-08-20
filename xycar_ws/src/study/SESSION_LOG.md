@@ -127,3 +127,39 @@ replay 에는 `/scan` 이 없어서 **이번에 고친 버그 자체를 재현�
    너무 크면 로그에 `far(cone N, h..px)` 가 계속 뜨고 구간에 못 들어간다.
 3. 콘 구간에서 `reason: cone_zone(rubbercone)` 이 뜨는가 (라이다가 몰고 있다는 표시).
 4. `jetson_clocks` 는 **재부팅하면 풀린다.** 전원 넣을 때마다 다시.
+
+---
+
+## 후속 (2026-08-21) — 비상 폴백 두 개를 제거
+
+위 §1 에 "설계상 이미 차단돼 있었다"고 적은 두 경로(`fusion.py` 의 복도 융합,
+`longitudinal.py` 의 전방거리 상한)를 **아예 들어냈다.**
+
+### 왜
+
+둘 다 `_drive_cone_zone()` 뒤의 `return` 아래에 있어서, **정상 주행에서는
+도달조차 못 하는 코드**였다. 실행되는 경우가 딱 하나 — "콘 구간인데
+rubbercone_node 가 죽은" 상황뿐이었다.
+
+그런데 그 폴백이 안전하지도 않았다. `/corridor` 는 합성 데이터로만 검증됐고
+`px_per_meter(300.0)` 는 실측 전 값이라, 라이다가 죽었을 때 **검증 안 된
+추정치로 콘 사이를 계속 달리는** 구조였다.
+
+### 어떻게 바꿨나
+
+    콘 구간 + rubbercone 살아있음  ->  라이다 주행 (그대로)
+    콘 구간 + rubbercone 죽음      ->  **정지** (기존: 복도 추정으로 계속 주행)
+    콘 구간 아님                    ->  차선 단독. 라이다 토픽을 구독조차 안 함
+
+콘 사이에서 멈추는 벌점이, 콘을 치거나 코스를 이탈하는 것보다 낫다는 판단.
+
+### 제거된 것
+
+    my_driver/my_driver/fusion.py          (삭제)
+    my_driver/tools/fusion_sim.py          (삭제 — 위 모듈 전용 시뮬)
+    driver_node  /corridor, /obstacle 구독  (제거)
+    longitudinal stop_dist/slow_dist/obstacle_cap_in_cone_only (제거)
+    debug_state  source, corridor_weight, front_dist 필드 (제거)
+
+`obstacle_node` 는 계속 돌지만 이제 주행에 쓰이지 않는다 — RViz 시각화용
+`/corridor_path` 만 `viz_node` 가 쓴다.

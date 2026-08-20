@@ -5,14 +5,12 @@
 
 구독:
     /lane      Float32MultiArray [offset_near, offset_far, valid, quality]
-    /corridor  Float32MultiArray [offset_near, offset_far, valid, quality]
-               라바콘 복도 중앙 (라이다). /lane 과 같은 형식·단위(픽셀)라
-               그대로 섞을 수 있다. 섞는 정책은 fusion.py 참고.
     /light     Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT
     /objects   Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y, cone_max_h]
-    /obstacle  Float32MultiArray [front_dist, left_free, right_free]
     /cone_cmd  Float32MultiArray [angle, speed]  라바콘 구간 전담 노드의 명령
     /cone_zone_active Bool                       그 노드의 구간 판정 (진단용, 제어 미사용)
+
+  ※ /corridor, /obstacle 은 **구독하지 않는다** (2026-08-21 제거). 아래 참고.
 발행:
     xycar_motor Float32MultiArray [angle, speed]
     debug_state String            JSON. my_debug/pipeline_view_node 시각화 전용.
@@ -56,8 +54,25 @@
 속도만 SpeedLimiter 를 통과시키는데, 알고리즘이 아니라 VESC 저전압 fault
 방지(하드웨어 보호) 때문이다 — _drive_cone_zone() 주석 참고.
 
-그 노드가 죽으면(cone_cmd 가 stale) 아래 차선/복도 경로가 비상 대체로
-동작한다. 그때만 fusion 의 /corridor 가 쓰인다.
+────────────────────────────────────────────────────────────────────────
+라이다는 이 노드에 **한 경로로만** 들어온다 (2026-08-21 정리)
+
+    콘 구간 + rubbercone 살아있음  ->  라이다 주행 (_drive_cone_zone)
+    콘 구간 + rubbercone 죽음      ->  **정지**
+    콘 구간 아님                    ->  차선 단독. 라이다 값을 읽지도 않는다
+
+이전에는 두 개의 비상 경로가 더 있었다: /corridor(복도 추정)를 차선과
+섞는 fusion, 그리고 /obstacle 의 front_dist 로 거는 전방 정지 상한.
+둘 다 **정상 주행에서는 도달조차 못 하는 코드**였다 — 위 첫 줄이 return
+하기 때문이다. 오직 "콘 구간인데 rubbercone 이 죽은" 경우에만 실행됐다.
+
+그런데 그 경로가 안전하지도 않았다. /corridor 는 합성 데이터로만 검증됐고
+px_per_meter(300.0)는 실측 전 값이라, 라이다가 죽었을 때 **검증 안 된
+추정치로 콘 사이를 계속 달리는** 구조였다. 콘 구간에서 멈추는 벌점보다
+콘을 치거나 코스를 이탈하는 쪽이 나쁘다고 판단해 통째로 들어냈다.
+
+obstacle_node 는 계속 /corridor·/obstacle 을 발행하지만 아무도 구독하지
+않는다 (RViz 시각화 /corridor_path 만 viz_node 가 쓴다).
 """
 
 import json
@@ -69,13 +84,27 @@ from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
 from my_driver.control import SpeedLimiter, SteeringController
-from my_driver.fsm import DriveFSM, State
 from my_driver.cone_zone import ConeZoneDetector
-from my_driver.fusion import FusedResult, LateralFusion, LateralRef
+from my_driver.fsm import DriveFSM, State
 from my_driver.lateral import LateralPlanner, OvertakeBehavior
 from my_driver.longitudinal import LongitudinalPlanner
 
 LIGHT_NAME = {0: "NONE", 1: "RED", 2: "YELLOW", 3: "GREEN", 4: "LEFT"}
+
+
+@dataclass
+class LaneRef:
+    """차선 기준 횡방향 목표. 로그·시각화가 쓰는 형식이기도 하다.
+
+    예전에는 여기에 복도(라이다) 융합 결과가 들어와서 corridor_weight/source
+    필드가 있었다. 융합을 없앤 뒤로는 출처가 항상 차선이라 그 필드도 뺐다
+    (모듈 docstring '라이다는 한 경로로만' 참고).
+    """
+
+    offset_near: float = 0.0
+    offset_far: float = 0.0
+    valid: bool = False
+    quality: float = 0.0
 
 
 @dataclass
@@ -92,12 +121,6 @@ class Obs:
     half_near: float = 0.0
     half_far: float = 0.0
 
-    # 라바콘 복도 (라이다). 같은 단위(픽셀)
-    cor_near: float = 0.0
-    cor_far: float = 0.0
-    cor_valid: bool = False
-    cor_quality: float = 0.0
-
     light: int = 0
 
     cone_n: int = 0
@@ -107,9 +130,10 @@ class Obs:
     car_bottom_y: float = 0.0
 
     cone_max_h: float = 0.0   # 가장 큰 콘 bbox 높이(px). 구간 진입 거리 판단용
-    front_dist: float = 99.0
-    left_free: float = 99.0
-    right_free: float = 99.0
+
+    # 라이다 관측(cor_*, front_dist, left_free, right_free)은 여기 없다.
+    # 이 노드는 라바콘 구간에서 rubbercone_node 의 완성된 명령(/cone_cmd)만
+    # 받아 통과시키고, 그 밖에서는 라이다를 아예 보지 않는다 (2026-08-21).
 
 
 class DriverNode(Node):
@@ -144,9 +168,6 @@ class DriverNode(Node):
                 # rubbercone_node 의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
                 # 그 노드는 /scan 주기(약 10Hz)로 발행하므로 0.5s 면 5프레임 여유.
                 ("cone_cmd_timeout_sec", 0.5),
-                # 차선 <-> 복도 전환 (구간에 따라 센서가 통째로 바뀐다)
-                ("fusion.weight_rate_per_sec", 1.5),
-                ("fusion.min_corridor_quality", 0.4),
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.shift_px", 120.0),
@@ -171,10 +192,7 @@ class DriverNode(Node):
                 ("speed.cone_n_lo", 2.0),
                 ("speed.cone_n_hi", 8.0),
                 ("speed.cone_factor_min", 0.6),
-                ("speed.stop_dist", 0.35),
-                ("speed.slow_dist", 1.2),
                 ("speed.overtake_factor", 0.7),
-                ("speed.obstacle_cap_in_cone_only", True),
                 # 조향
                 ("steer.k_lat", 0.10),
                 ("steer.k_curve", 0.06),
@@ -205,10 +223,6 @@ class DriverNode(Node):
             exit_hold_sec=g("cone_zone.exit_hold_sec").value,
         )
         self.cone_cmd_timeout = g("cone_cmd_timeout_sec").value
-        self.fusion = LateralFusion(
-            weight_rate_per_sec=g("fusion.weight_rate_per_sec").value,
-            min_corridor_quality=g("fusion.min_corridor_quality").value,
-        )
         self.lateral = LateralPlanner(
             OvertakeBehavior(
                 shift_px=g("lateral.shift_px").value,
@@ -233,10 +247,7 @@ class DriverNode(Node):
             cone_n_lo=g("speed.cone_n_lo").value,
             cone_n_hi=g("speed.cone_n_hi").value,
             cone_factor_min=g("speed.cone_factor_min").value,
-            stop_dist=g("speed.stop_dist").value,
-            slow_dist=g("speed.slow_dist").value,
             overtake_factor=g("speed.overtake_factor").value,
-            obstacle_cap_in_cone_only=g("speed.obstacle_cap_in_cone_only").value,
         )
         self.steering = SteeringController(
             k_lat=g("steer.k_lat").value,
@@ -259,7 +270,6 @@ class DriverNode(Node):
         self._ref = FusedResult()
         self._enabled = not self.require_enable
         self._last_lane_time = None
-        self._last_corridor_time = None
         self._lane_lost_since = None
         self._target_offset = 0.0
         # 라바콘 노드 mux 상태
@@ -283,10 +293,8 @@ class DriverNode(Node):
         # 새로 만들 정도의 가치가 없다 (디버그 전용, 프로토콜에 안 얹힘).
         self.pub_debug = self.create_publisher(String, "debug_state", 10)
         self.create_subscription(Float32MultiArray, "lane", self.on_lane, qos)
-        self.create_subscription(Float32MultiArray, "corridor", self.on_corridor, qos)
         self.create_subscription(Int32, "light", self.on_light, qos)
         self.create_subscription(Float32MultiArray, "objects", self.on_objects, qos)
-        self.create_subscription(Float32MultiArray, "obstacle", self.on_obstacle, qos)
         self.create_subscription(Bool, "drive_enable", self.on_enable, qos)
         # 라바콘 구간 전담 노드(my_obstacle/rubbercone_node)의 출력.
         # 그 노드가 스스로 구간을 판정하고 조향/속도까지 다 만든다. 우리는
@@ -321,14 +329,6 @@ class DriverNode(Node):
             self.obs.half_far = msg.data[5]
         self._last_lane_time = self.get_clock().now()
 
-    def on_corridor(self, msg):
-        if len(msg.data) < 4:
-            return
-        self.obs.cor_near = msg.data[0]
-        self.obs.cor_far = msg.data[1]
-        self.obs.cor_valid = msg.data[2] > 0.5
-        self.obs.cor_quality = msg.data[3]
-        self._last_corridor_time = self.get_clock().now()
 
     def on_light(self, msg):
         self.obs.light = int(msg.data)
@@ -346,12 +346,6 @@ class DriverNode(Node):
         if len(msg.data) >= 6:
             self.obs.cone_max_h = msg.data[5]
 
-    def on_obstacle(self, msg):
-        if len(msg.data) < 3:
-            return
-        self.obs.front_dist = msg.data[0]
-        self.obs.left_free = msg.data[1]
-        self.obs.right_free = msg.data[2]
 
     def on_cone_cmd(self, msg):
         if len(msg.data) < 2:
@@ -437,43 +431,31 @@ class DriverNode(Node):
             self._drive_cone_zone(dt, state)
             return
 
+        if in_cone_zone:
+            # 콘 구간인데 명령이 안 온다 = rubbercone_node 가 죽었거나 라이다가 끊겼다.
+            # **정지한다.** 차선으로 되돌아가면 콘을 친다 — 우측 콘 벽이 흰 실선보다
+            # 안쪽이라 차선 중심을 따라가는 것 자체가 콘으로 들어가는 길이다.
+            # 콘 사이에서 멈추는 벌점이, 콘을 치거나 코스를 이탈하는 것보다 낫다.
+            self.get_logger().error(
+                "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 정지 "
+                "(라이다/rubbercone_node 점검)", throttle_duration_sec=1.0)
+            self._halt()
+            self._log(state, 0.0, 0.0, "cone_cmd lost")
+            self._pub_debug(state.value, 0.0, 0.0, "cone_cmd lost")
+            return
+
         if self._last_source != "lane":
-            if in_cone_zone:
-                # 구간이라는데 명령이 안 온다 = 그 노드가 죽었거나 라이다가 끊겼다.
-                # 조용히 차선 주행으로 돌아가면 콘을 칠 수 있으므로 경고를 남긴다.
-                self.get_logger().warn(
-                    "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 차선 주행으로 비상 대체")
-            else:
-                self.get_logger().info(
-                    f"CONE_ZONE 이탈 — 차선 주행으로 복귀 ({self.cone_zone.last_reason})")
+            self.get_logger().info(
+                f"CONE_ZONE 이탈 — 차선 주행으로 복귀 ({self.cone_zone.last_reason})")
             self._last_source = "lane"
 
-        # 여기 도달했다는 건 "구간이 아니거나, 구간인데 rubbercone_node 가
-        # 죽었다"는 뜻이다. 후자면 아래 차선/복도 경로가 비상 대체로 동작한다.
-
-        # 차선(카메라)과 콘 복도(라이다)를 섞어 최종 횡방향 기준을 만든다.
-        # 라바콘 구간에서는 콘 벽이 실제 주행 가능 경계이므로 복도 쪽 비중이 커진다.
-        # obstacle_node 가 죽어도 마지막 /corridor 값은 남아 있다. 낡은 복도를
-        # 계속 따라가면 콘 벽이 이미 지나갔는데도 그쪽으로 조향한다.
-        # 차선과 같은 기준(stale_timeout_sec)으로 무효 처리한다.
-        cor_fresh = (
-            self._last_corridor_time is not None
-            and (now - self._last_corridor_time).nanoseconds / 1e9 <= self.stale_timeout
-        )
-
-        ref = self.fusion.update(
-            dt,
-            LateralRef(self.obs.offset_near, self.obs.offset_far,
-                       self.obs.lane_valid, self.obs.quality),
-            LateralRef(self.obs.cor_near, self.obs.cor_far,
-                       self.obs.cor_valid and cor_fresh, self.obs.cor_quality),
-            cone_zone=in_cone_zone,
-        )
+        # 여기 도달했다 = 콘 구간이 아니다. 횡방향 기준은 **차선 단독**이다.
+        # 라이다(복도)를 섞던 fusion 은 제거했다 — 모듈 docstring 참고.
+        ref = LaneRef(self.obs.offset_near, self.obs.offset_far,
+                      self.obs.lane_valid, self.obs.quality)
         self._ref = ref
 
-        # 기준을 아예 못 만드는 상태가 오래가면 정지.
-        # 차선만 보고 판단하면 안 된다 — 콘 구간에서 차선이 안 보여도
-        # 복도가 살아있으면 계속 갈 수 있어야 한다.
+        # 차선을 오래 못 보면 정지.
         if ref.valid:
             self._lane_lost_since = None
         elif self._lane_lost_since is None:
@@ -495,9 +477,8 @@ class DriverNode(Node):
         # 종방향은 그 결과(기동 중인지)를 받아 감속한다 — 순서가 중요하다.
         target_speed = self.longitudinal.update(
             ref.valid, ref.offset_near, ref.offset_far,
-            ref.quality, self.obs.cone_n, self.obs.front_dist,
+            ref.quality, self.obs.cone_n,
             overtake_active=self.lateral.overtake.active,
-            cone_zone=in_cone_zone,
         )
         speed = self.speed_limiter.update(dt, target_speed)
 
@@ -554,17 +535,14 @@ class DriverNode(Node):
             "off_far": round(ref.offset_far, 1),
             "quality": round(ref.quality, 2),
             "valid": bool(ref.valid),
-            "source": ref.source,
-            "corridor_weight": round(ref.corridor_weight, 2),
             "light": LIGHT_NAME.get(self.obs.light, "?"),
-            "front_dist": round(self.obs.front_dist, 2),
             "cone_n": self.obs.cone_n,
             # 구간 진입 트리거의 거리 조건. cone_n 은 찼는데 이게 작아서 안
             # 들어가는 상황을 화면에서 바로 구분하려면 같이 보여야 한다.
             "cone_h": round(self.obs.cone_max_h, 0),
             "zone_why": self.cone_zone.last_reason,
-            # 라이다를 쓰고 있는 구간인지. 화면에서 바로 구분돼야 "지금 복도를
-            # 따라가는 중인가, 차선을 따라가는 중인가"를 오해하지 않는다.
+            # 라이다(rubbercone_node)가 몰고 있는 구간인지. 화면에서 바로
+            # 구분돼야 "지금 누가 운전 중인가"를 오해하지 않는다.
             "cone_zone": bool(self.cone_zone.active),
             # 라이다 쪽 판정. 제어에는 안 쓰지만, 카메라 판정과 얼마나
             # 어긋나는지 화면에서 바로 보이게 같이 싣는다.
@@ -591,10 +569,9 @@ class DriverNode(Node):
         self.get_logger().info(
             f"[{state.value}] angle={angle:+6.1f} speed={speed:5.1f} | "
             f"off={ref.offset_near:+6.1f}/{ref.offset_far:+6.1f} "
-            f"q={ref.quality:.2f} {'OK' if ref.valid else 'HOLD'} "
-            f"[{ref.source} w{ref.corridor_weight:.2f}] | "
-            f"light={LIGHT_NAME.get(self.obs.light, '?')} front={self.obs.front_dist:.2f}m "
-            f"cone={self.obs.cone_n}{'[ZONE]' if self._cone_zone_from_node else ''} "
+            f"q={ref.quality:.2f} {'OK' if ref.valid else 'HOLD'} | "
+            f"light={LIGHT_NAME.get(self.obs.light, '?')} "
+            f"cone={self.obs.cone_n}{'[ZONE]' if self.cone_zone.active else ''} "
             f"ov={ov} | {reason}"
         )
 

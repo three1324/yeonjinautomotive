@@ -213,12 +213,25 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
 
 - [ ] **콘 구간 밖에서 라이다 간섭이 없는지 확인**
 
-      `cone_zone(rubbercone)` 이 아닌 상태에서 `reason` 에 `STOP(...)` 이나
-      `obstacle(...)` 이 뜨면 **버그다** — 콘 구간 밖에서는 라이다 전방거리를
-      안 쓰기로 했다(`speed.obstacle_cap_in_cone_only: true`).
+      `cone_zone` 이 false 인 동안 driver_node 는 **라이다 토픽을 구독조차
+      하지 않는다**(2026-08-21). 그러니 이때 나오는 조향·속도는 전부 카메라
+      결과여야 한다. `reason` 에 거리(m) 기반 사유가 뜨면 코드가 되돌아간
+      것이다.
 
-- [ ] **★ 콘 구간 rosbag 을 딴다** — 복도 추정 튜닝값이 전부 **합성 데이터 기반**이라
-      실제 콘 간격·복도 폭으로 재검증해야 한다. **절차는 §9 참고.**
+      ```bash
+      ros2 topic info /obstacle    # Subscription count 가 0 이어야 정상
+      ros2 topic info /corridor    # 마찬가지 (viz 의 /corridor_path 와 다른 토픽)
+      ```
+
+- [ ] **콘 구간에서 라이다가 죽으면 정지하는지** (2026-08-21 변경)
+
+      `/cone_cmd` 가 끊기면 차선으로 되돌아가지 않고 **정지**한다. 콘 구간에서
+      차선 중심을 따라가는 것 자체가 콘으로 들어가는 길이기 때문이다.
+      콘 구간 진입 후 rubbercone_node 를 죽여(`pkill -f rubbercone`) 확인:
+
+      ```
+      [ERROR] CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 정지 (라이다/rubbercone_node 점검)
+      ```
 
 자세한 근거와 로그 원문은 §8.
 
@@ -474,10 +487,13 @@ python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM --x-max 2.6 --bin-size 0.12
 | `corridor.nominal_half_width_m` | 0.35 | 실측 콘 복도 폭의 절반 |
 | `corridor.x_max` | 2.2 | 라이다가 콘을 실제로 잡는 거리 |
 | `corridor.bin_size` | 0.15 | 실제 콘 간격에 맞춰 |
-| `fusion.cone_n_lo/hi` | 2 / 6 | 콘 구간에서 YOLO 가 실제로 몇 개를 세는지 |
+| `cone_zone.enter_n / exit_n` | 8 / 2 | 콘 구간에서 YOLO 가 실제로 몇 개를 세는지 |
+| `cone_zone.enter_min_size_px` | 90.0 | 구간에 **닿았을 때** 가장 큰 콘 bbox 높이. 화각·해상도 종속이라 실차 카메라로 재확인 필요 |
 
-`px_per_meter` 가 틀리면 **라이다 복도와 카메라 차선의 단위가 안 맞아** 융합이 통째로
-어긋난다. 다른 어떤 튜닝보다 먼저 이것부터 맞출 것.
+⚠️ `corridor.*` 는 **더 이상 주행에 쓰이지 않는다**(2026-08-21). 라바콘 구간은
+`rubbercone_node` 가 라이다 원본 스캔으로 직접 몰고, 복도 추정을 차선과 섞던
+fusion 은 제거했다. 위 값들은 RViz 의 `/corridor_path` 시각화에만 영향을 준다.
+**주행에 실제로 영향을 주는 것은 `rubbercone_node.*` 와 `cone_zone.*` 이다.**
 
 ---
 
