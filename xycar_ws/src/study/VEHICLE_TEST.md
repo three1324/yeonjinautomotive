@@ -159,8 +159,8 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
 
 - [ ] `/scan` 이 살아난 뒤 `/cone_cmd` 가 오는지 확인
       (`rubbercone_node` 가 낸다. 라이다가 죽어 있으면 안 나온다)
-      `/obstacle` `/corridor` 도 `obstacle_node` 가 계속 내지만 **주행에는
-      쓰이지 않는다** — RViz 의 `/corridor_path` 시각화 전용이다.
+      `/scan` 을 구독하는 노드는 이제 `rubbercone_node` 하나뿐이다
+      (`obstacle_node` 는 2026-08-21 삭제).
 
 - [ ] **★ `xycar_motor` 발행자가 하나뿐인지 확인** — 가장 위험한 실수
 
@@ -220,8 +220,8 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
       것이다.
 
       ```bash
-      ros2 topic info /obstacle    # Subscription count 가 0 이어야 정상
-      ros2 topic info /corridor    # 마찬가지 (viz 의 /corridor_path 와 다른 토픽)
+      ros2 topic list | grep -E '/obstacle|/corridor'   # 아무것도 안 나와야 정상
+      ros2 topic info /scan --verbose | grep -c 'Node name'  # 구독자는 rubbercone 뿐
       ```
 
 - [ ] **콘 구간에서 라이다가 죽으면 정지하는지** (2026-08-21 변경)
@@ -238,10 +238,10 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
 
 ---
 
-## 4-0. ★ 조향 부호 확정 — **다른 무엇보다 먼저. 30초면 된다**
+## 4-0. ★ 조향 부호 — **확정됨 (2026-08-21 실측)**
 
-`steer.invert` 가 틀리면 제어 루프가 양성 피드백이 되어 **곡선마다 반대로 꺾어
-이탈한다.** 지금 이 값의 근거가 서로 충돌하고 있어(아래) 추론으로 두면 안 된다.
+> **결론: 명령 +값 = 좌회전. `steer.invert` = `true`.**
+> 더는 추론하지 말 것. 아래는 재확인이 필요할 때의 절차다.
 
 **주행 노드를 전부 끄고**(driver_node 가 같은 토픽에 쓰면 안 된다) 차를 들어올린
 상태에서 **직접 명령을 넣고 바퀴를 눈으로 본다:**
@@ -253,24 +253,47 @@ ros2 topic pub -r 10 /xycar_motor std_msgs/msg/Float32MultiArray '{data: [20.0, 
 
 | 앞바퀴가 향하는 쪽 | 뜻 | `steer.invert` |
 |---|---|---|
-| **오른쪽** | 양수 명령 = 우회전 | **false** (현재 설정) |
-| **왼쪽** | 양수 명령 = 좌회전 | **true** |
+| **왼쪽** | 양수 명령 = 좌회전 | **true** ← ✅ 2026-08-21 측정 결과 |
+| 오른쪽 | 양수 명령 = 우회전 | false |
 
 `-20.0` 으로도 한 번 해서 반대로 가는지 확인하면 끝이다.
 
-<details>
-<summary>왜 이걸 꼭 해야 하나 — 근거가 충돌한다</summary>
+### 이 측정으로 정리된 것
 
-| 출처 | 주장 |
+| 값 | 결과 |
 |---|---|
-| 8/19 실측표 (§10) | "양수 명령 = 양수 실측, **왼쪽 기준**" → 양수 = **좌회전** |
-| 8/21 역산 | S자 좌커브에서 우측 이탈 ⇒ 양수 = **우회전** |
-| `viz_node.angle_sign: -1.0` (REP-103 반대) | 양수 = **우회전** |
+| `driver_node.steer.invert` | `false` -> **`true`** |
+| `viz_node.angle_sign` | `-1.0` -> **`1.0`** (REP-103 과 규약이 같아짐) |
+| `rubbercone_node.invert_steer` | **`false` 그대로 — 건드리지 않는다** (아래) |
 
-2:1 로 "우회전" 쪽이라 현재 `invert: false` 로 두었지만, 8/19 표가 맞다면
-**false 가 그 이탈을 그대로 재현한다.** 역산은 관찰 기반 추론이고 위 테스트는
-직접 측정이다. 측정이 이긴다.
-</details>
+### ⚠️ `rubbercone_node.invert_steer` 는 같이 뒤집지 않는다
+
+예전 이 문서에는 "두 값은 하나의 사실을 공유하니 같이 뒤집으라"고 적혀
+있었는데 **그건 틀렸다.** 두 경로는 코드상 완전히 독립이다:
+
+```
+차선 주행 : driver_node -> SteeringController(steer.invert 적용) -> /xycar_motor
+콘  구간 : rubbercone_node -> 자체 invert_steer 적용 -> /cone_cmd
+           -> driver_node 가 조향을 **건드리지 않고 그대로** 통과
+```
+
+`rubbercone_node.py:332` 가 자기 `invert_steer` 를 적용해 이미 완성된 각도를
+내보낸다. `steer.invert` 는 그 값에 닿지 않는다. 게다가 그쪽 `false` 는 팀원이
+**실차 콘 주행으로 검증한 값**이다. 그대로 둔다.
+
+### 이 이탈이 부호 문제가 아니었다면, 원인은 무엇이었나 ★
+
+`invert: true` 는 8/19 낮부터 쓰던 값이고, **그 상태에서 S자 우측 이탈이
+관측됐다.** 부호가 맞다면 그 이탈의 원인은 따로 있다. 그 뒤에 고쳐진 후보 셋:
+
+| 후보 | 상태 |
+|---|---|
+| 라이다가 콘 구간 밖에서 제어권을 뺏고 있었음 | 해소 — 이제 구간 밖에서는 라이다를 구독조차 안 한다 |
+| `lateral._offset()` 회피 목표 부호 뒤집힘 | 8/21 수정 |
+| `angle_limit: 50` 포화 와인드업 (실제 포화는 35도) | 8/21 35 로 수정 |
+
+셋 다 고쳐진 상태이므로 **재주행으로 확인해야 한다.** 재주행에서도 우측으로
+이탈하면 위 세 가지가 아닌 네 번째 원인이 있다는 뜻이다.
 
 ---
 
@@ -383,7 +406,7 @@ ros2 topic echo /scan --qos-reliability best_effort    # 이렇게 볼 것
 ros2 topic hz   /scan --qos-reliability best_effort
 ```
 
-`obstacle_node` 와 `viz_node` 는 BEST_EFFORT 로 구독하므로 정상 동작한다. RViz 는
+`rubbercone_node` 와 `viz_node` 는 BEST_EFFORT 로 구독하므로 정상 동작한다. RViz 는
 Display 의 Reliability Policy 를 Best Effort 로 두면 된다(`drive.rviz` 는 이미 그렇다).
 
 ### 증상 3 — `ros2 topic list` 에 `/scan` 이 없는데 실제로는 발행 중 (2026-08-19)
@@ -435,10 +458,10 @@ Now lidar is scanning...                              (기동 ~2.5초 소요)
 
 ## 9. 콘 구간 rosbag 뜨는 법 ★
 
-**왜 필요한가:** `corridor.py` 의 중앙선 추정 개선(far 오차 91.7 → 31.2px)은 전부
-**제가 만든 합성 S자 코스** 기준이다. 실제 콘 간격·복도 폭·라이다 반사 특성은 아직
-모른다. bag 하나만 있으면 `corridor_sim.py --bag` 으로 PC 에서 실제 값으로 재튜닝할 수
-있다 — 차를 다시 굴리지 않고도 파라미터를 몇 번이고 바꿔 볼 수 있다는 뜻이다.
+**왜 필요한가:** `rubbercone_node` 의 값(클러스터링 임계·페어링 간격·lookahead)은
+팀원이 **다른 차·다른 코스**에서 맞춘 것이다. 실제 콘 간격·복도 폭·라이다 반사
+특성은 아직 우리 트랙에서 확인되지 않았다. bag 하나면 차를 다시 굴리지 않고
+`ros2 bag play` 로 몇 번이고 다시 돌려볼 수 있다.
 
 ### 9-1. 녹화
 
@@ -450,15 +473,15 @@ ros2 launch my_bringup drive.launch.py rviz:=true
 
 # 터미널 2 — 녹화 (콘 코스 앞에서 시작)
 cd ~ && ros2 bag record -o cone_$(date +%m%d_%H%M) \
-    /scan /image_raw /corridor /obstacle /lane /objects /debug_state
+    /scan /image_raw /cone_cmd /lane /objects /debug_state
 ```
 
 | 토픽 | 왜 넣나 |
 |---|---|
 | `/scan` | **필수.** 복도 추정을 다시 돌릴 원본 |
 | `/image_raw` | 그때 눈으로 뭐가 보였는지 대조용 (용량이 크다. 아래 참고) |
-| `/corridor` | 그때 추정이 뭐라고 했는지 — 개선 전후 비교 기준 |
-| `/obstacle` `/lane` `/objects` `/debug_state` | 융합·판단이 어떻게 반응했는지 |
+| `/cone_cmd` | 그때 rubbercone 이 뭐라고 했는지 — 튜닝 전후 비교 기준 |
+| `/lane` `/objects` `/debug_state` | 판단이 어떻게 반응했는지 (구간 진입/이탈 시점 포함) |
 
 **차를 어떻게 움직이나:** 자율주행일 필요 없다. **손으로 밀거나 조종기로 천천히**
 콘 코스를 통과시키면 된다. 중요한 건 콘 사이를 실제로 지나가는 것이다.
@@ -495,22 +518,23 @@ ros2 bag info cone_MMDD_HHMM
 - [ ] `Duration` 이 의도한 길이인가
 - [ ] `Storage id: sqlite3` 인가
 
-### 9-4. 실측 재튜닝 (PC / 젯슨, ROS 불필요)
+### 9-4. 재튜닝 (bag 재생 + 파라미터 변경)
+
+`corridor_sim.py` 는 없앴다(`obstacle_node` 와 함께 2026-08-21 삭제). 이제는
+bag 을 틀어 놓고 `rubbercone_node` 만 띄운 뒤, 파라미터를 바꿔가며 `/cone_cmd`
+와 `/rubbercone/debug_image` 를 본다.
 
 ```bash
-cd ~/xycar_ws/src/study/my_obstacle
-python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM
-python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM --plot    # 그림으로
+# 터미널 1
+ros2 bag play ~/cone_MMDD_HHMM --loop
+# 터미널 2
+ros2 run my_obstacle rubbercone_node --ros-args \
+    --params-file ~/xycar_ws/install/my_bringup/share/my_bringup/config/drive_params.yaml
+# 터미널 3 — 재시작 없이 값 바꾸기
+ros2 param set /rubbercone_node cluster_max_span_m 0.35
 ```
 
-출력에 **"스캔 N개 중 복도 유효 M개 (xx.x%)"** 가 나온다. 이 비율이 낮으면 그 아래
-안내대로 `--x-max` / `--bin-size` / `--half-width` 를 바꿔가며 다시 돌린다:
-
-```bash
-python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM --x-max 2.6 --bin-size 0.12
-```
-
-찾은 값을 `my_bringup/config/drive_params.yaml` 의 `obstacle_node.corridor` 에 반영한다.
+찾은 값을 `my_bringup/config/drive_params.yaml` 의 `rubbercone_node` 에 반영한다.
 
 ### 9-5. 이 bag 으로 확정해야 할 값
 
@@ -518,17 +542,16 @@ python3 tools/corridor_sim.py --bag ~/cone_MMDD_HHMM --x-max 2.6 --bin-size 0.12
 
 | 파라미터 | 지금 값 | 무엇으로 정하나 |
 |---|---|---|
-| `corridor.px_per_meter` | 300.0 | **가장 중요.** `(lane 픽셀 반폭 × 2) / 실측 트랙폭(m)`. 줄자 + perception 로그면 된다 |
-| `corridor.nominal_half_width_m` | 0.35 | 실측 콘 복도 폭의 절반 |
-| `corridor.x_max` | 2.2 | 라이다가 콘을 실제로 잡는 거리 |
-| `corridor.bin_size` | 0.15 | 실제 콘 간격에 맞춰 |
+| `rubbercone.cluster_max_span_m` | 0.4 | 콘 하나의 실측 폭. 이보다 크면 벽으로 버린다 |
+| `rubbercone.min_gap_m` | 0.5 | 실측 콘 복도 폭 |
+| `rubbercone.forward_max` | 2.5 | 라이다가 콘을 실제로 잡는 거리 |
+| `rubbercone.lookahead_min_m` | 0.3 | 실차에서 코너를 깎지 않는 최소값 |
 | `cone_zone.enter_n / exit_n` | 8 / 2 | 콘 구간에서 YOLO 가 실제로 몇 개를 세는지 |
 | `cone_zone.enter_min_size_px` | 90.0 | 구간에 **닿았을 때** 가장 큰 콘 bbox 높이. 화각·해상도 종속이라 실차 카메라로 재확인 필요 |
 
-⚠️ `corridor.*` 는 **더 이상 주행에 쓰이지 않는다**(2026-08-21). 라바콘 구간은
-`rubbercone_node` 가 라이다 원본 스캔으로 직접 몰고, 복도 추정을 차선과 섞던
-fusion 은 제거했다. 위 값들은 RViz 의 `/corridor_path` 시각화에만 영향을 준다.
-**주행에 실제로 영향을 주는 것은 `rubbercone_node.*` 와 `cone_zone.*` 이다.**
+⚠️ 라이다 복도 추정(`corridor.*`)과 그것을 내던 `obstacle_node` 는 **통째로
+삭제됐다**(2026-08-21). 라이다는 이제 `rubbercone_node` 한 노드에서만 쓰이고,
+그 노드는 콘 구간에서만 제어권을 갖는다.
 
 ---
 

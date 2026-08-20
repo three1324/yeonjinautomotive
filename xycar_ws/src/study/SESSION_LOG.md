@@ -8,6 +8,53 @@
 
 ---
 
+## 2026-08-21 — 조향 부호를 **측정으로** 확정하다 (+angle = 좌회전)
+
+### 무엇을 했나
+
+차를 들어올리고 주행 노드를 모두 끈 뒤, `/xycar_motor` 에 `[20.0, 0.0]` 을
+직접 발행했다. **앞바퀴가 왼쪽으로 돌았다.**
+
+    명령 +값 = 좌회전
+    좌커브 -> offset_near < 0 -> err < 0 -> raw < 0
+    좌커브에서 좌회전하려면 angle > 0  ⇒  angle = -raw  ⇒  invert = true
+
+    driver_node.steer.invert   false -> true
+    viz_node.angle_sign        -1.0  -> 1.0   (REP-103 과 규약이 같아짐)
+    rubbercone_node.invert_steer  false 유지   (독립 경로 — 아래)
+
+### 8/21 아침의 역산이 틀렸다
+
+어제 "S자 좌커브에서 우측 이탈" 증상으로 부호를 역산해 `invert` 를 false 로
+되돌렸다. 그 역산은 **"인지->제어 사이에 다른 반전이 없다"를 전제**했는데,
+그 전제를 검증하지 못한 채 부호만 뒤집은 것이다. 같은 8/19 실측표
+("양수 명령 = 양수 실측, 왼쪽 기준")와 오늘 측정이 독립적으로 일치하므로
+이제 근거는 2:0 이다.
+
+**교훈: 증상에서 부호를 역산하지 말 것. 30초면 직접 잴 수 있다.**
+같은 실수를 이틀 연속 다른 방향으로 했다 — 8/19 에는 라이다에 오염된 관찰로,
+8/21 에는 검증 안 된 전제 위의 계산으로.
+
+### 그러면 그 우측 이탈은 왜 났나 ★ 미해결
+
+`invert: true` 는 8/19 낮부터 쓰던 값이고 그 상태에서 이탈이 났다. 부호가
+맞다면 원인은 따로 있다. 그 뒤에 고쳐진 후보가 셋이다:
+
+- 라이다가 콘 구간 밖에서 제어권을 뺏고 있었음 (지금은 구독조차 안 함)
+- `lateral._offset()` 회피 목표 부호 뒤집힘 (8/21 수정)
+- `angle_limit: 50` 포화 와인드업 — 실제 기계 포화는 35도 (8/21 35 로 수정)
+
+셋 다 고쳐졌으니 **재주행에서 이탈이 재현되는지**가 다음 확인 항목이다.
+재현되면 네 번째 원인이 있다는 뜻이다.
+
+### rubbercone 은 왜 안 뒤집나
+
+코드상 완전히 독립된 경로다. `rubbercone_node.py:332` 가 자기 `invert_steer` 를
+적용해 완성된 각도를 `/cone_cmd` 로 내보내고, `driver_node` 는 그것을
+`SteeringController` 를 거치지 않고 그대로 통과시킨다. `steer.invert` 는 그
+값에 닿지 않는다. 그쪽 `false` 는 팀원 실차 검증값이라 그대로 둔다.
+VEHICLE_TEST 에 "같이 뒤집으라"고 적혀 있던 것은 잘못이라 오늘 고쳤다.
+
 ## 2026-08-19 (밤) — 라이다 간섭, 콘 구간 판정, TensorRT
 
 ### 발단
@@ -163,3 +210,77 @@ rubbercone_node 가 죽은" 상황뿐이었다.
 
 `obstacle_node` 는 계속 돌지만 이제 주행에 쓰이지 않는다 — RViz 시각화용
 `/corridor_path` 만 `viz_node` 가 쓴다.
+
+---
+
+## 2026-08-21 · 왜 라이다로 달렸나 — launch 의 params_file 누수
+
+콘 구간이 아닌데(cone=0), 차선도 신호등도 안 잡힌 상태에서 모터 명령이
+들락거렸다. 원인은 코드 로직이 아니라 **launch 였다.**
+
+    $ ros2 topic info /xycar_motor --verbose
+    Publisher count: 2
+      rubbercone_node      ← 있으면 안 되는 것
+      driver_node
+
+    $ ros2 param get /rubbercone_node drive_topic
+    String value is: xycar_motor      ← drive_params.yaml 의 cone_cmd 가 아니라 기본값
+
+    $ ps -ef | grep driver_node
+    ... --params-file .../xycar_lidar/share/xycar_lidar/params/ydlidar.yaml
+
+우리 노드 4개(perception/obstacle/rubbercone/driver)가 전부 **ydlidar.yaml**
+을 받고 있었다. `drive_params.yaml` 의 값이 하나도 안 들어간 채, 전부
+코드 기본값으로 떠 있었던 것이다.
+
+### 왜
+
+`IncludeLaunchDescription(..., launch_arguments={'params_file': ydlidar.yaml})`
+의 launch_arguments 는 **현재 스코프에** `SetLaunchConfiguration` 을 깐다.
+라이다 include 가 우리 노드들보다 앞에 있으므로, 그 뒤에 오는 모든
+`LaunchConfiguration('params_file')` 이 ydlidar.yaml 로 바뀌었다.
+
+라이다 yaml 을 못박은 것 자체는 맞는 조치였다(그게 없으면 라이다가
+시리얼 포트를 못 열고 죽는다). 빠진 건 **스코프**였다.
+
+### 고친 것
+
+1. `drive.launch.py` — 라이다 include 를 `GroupAction(scoped=True)` 로 감쌌다.
+   못박은 값이 그 그룹 밖으로 새지 않는다.
+2. `rubbercone_node.py` — `drive_topic` 기본값을 `xycar_motor` -> `cone_cmd`,
+   `zone_topic` 기본값을 `/cone_zone_active` 로. params 가 한 번이라도 안
+   실려도 이 노드가 모터에 직접 쏘는 일은 다시는 없다.
+3. `preflight.py` — `/xycar_motor` 발행자가 2개 이상이면 FAIL.
+
+### 재발 방지 점검 한 줄
+
+    ros2 topic info /xycar_motor --verbose | grep -c "Node name"   # 1 이어야 한다
+
+### 이어서 — obstacle_node 통째로 삭제
+
+위 누수를 고치고 나서도 RViz 에는 라이다에서 나온 파란 복도선이 계속 그려졌다.
+주행에는 안 쓰이지만(구독자가 viz_node 뿐), **시각화만을 위해 라이다 복도
+추정을 상시 돌리는 것 자체가 남겨둘 이유가 없다.** "라바콘 주행만 남기고
+라이다는 없앤다"는 결정에 어긋나기도 한다.
+
+삭제:
+
+    my_obstacle/my_obstacle/obstacle_node.py   (노드)
+    my_obstacle/my_obstacle/corridor.py        (복도 중앙선 추정)
+    my_obstacle/my_obstacle/sectors.py         (섹터 최근접 거리)
+    my_obstacle/tools/corridor_sim.py          (위 모듈 전용 시뮬)
+    my_obstacle/launch/obstacle.launch.py
+    setup.py entry_point  obstacle_node
+    drive.launch.py       obstacle Node
+    drive_params.yaml     obstacle_node 블록 · viz_node.corridor.*
+    viz_node              /corridor /obstacle /corridor_path 구독, /viz/ref_path 발행,
+                          전방거리 마커, 복도 색선 마커
+    drive.rviz            ref path · corridor path · cone walls 디스플레이
+
+이제 `/scan` 을 구독하는 노드는 **rubbercone_node 하나**다(+viz_node 의
+포인트클라우드 변환). 그 노드는 콘 구간에서만 제어권을 갖는다.
+
+RViz 에서 "지금 뭘 따르고 있나"는 상태 텍스트 **색**으로 본다 —
+노랑=카메라 차선 / 빨강=라바콘 구간.
+
+    $ ros2 topic list | grep -E '/corridor|/obstacle'   # 아무것도 안 나와야 한다
