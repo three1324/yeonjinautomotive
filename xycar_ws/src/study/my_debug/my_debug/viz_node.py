@@ -8,21 +8,15 @@ pipeline_view_node 가 **카메라 화면**(YOLO 검출 + 차선/판단 텍스�
 
 발행 (전부 /viz 아래):
     /viz/scan_cloud   PointCloud2   /scan 을 3D 포인트로 변환 (RViz PointCloud2 패널용)
-    /viz/ref_path     Path          my_obstacle 이 낸 라바콘 복도 중앙선. corridor 토픽의
-                                    픽셀 오프셋을 px_per_meter 로 **미터로 되돌린** 것이라
-                                    "변환 정보"를 눈으로 검증하는 용도다.
     /viz/plan_path    Path          현재 조향/속도 명령을 자전거 모델로 적분한 예측 경로.
                                     차가 지금 명령대로 가면 어디로 가는지 = 계획 경로.
     /viz/driven_path  Path          지금까지 지나온 궤적 (odom 프레임).
     /viz/odom         Odometry      odom 토픽이 없을 때만. 아래 '오도메트리' 참고.
     /viz/markers      MarkerArray   FSM 상태·조향·속도 텍스트, 전방거리 표식, 차체,
-                                    그리고 **현재 추종 기준을 색으로 보여주는 선**
-                                    (lane=노랑 / blend=주황 / corridor=빨강).
+                                    그리고 차체 외형.
 
 구독:
     /scan        LaserScan            (param scan_topic)
-    /corridor    Float32MultiArray    my_obstacle — [off_near, off_far, valid, quality] px
-    /obstacle    Float32MultiArray    my_obstacle — [front, left_free, right_free] m
     /debug_state String(JSON)         my_driver  — 판단/제어 상태 전체
     /odom        Odometry             (param odom_topic) 있으면 그대로 쓴다
 
@@ -47,7 +41,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import LaserScan, PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Float32MultiArray, Header, String
+from std_msgs.msg import Header, String
 from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -87,9 +81,12 @@ class VizNode(Node):
                 ("max_steer_deg", 19.5),      # [실측] angle_limit 일 때의 실제 앞바퀴 조향각
                 ("speed_to_mps", 0.08),
                 ("wheelbase_m", 0.333),       # [실측] 축거 33.3cm
-                # angle 부호 -> 차량 회전 방향. +angle 이 우회전이면 -1
+                # angle 부호 -> 차량 회전 방향. +angle 이 우회전이면 -1.
+                # [실측 2026-08-21] 차를 들어올리고 +20 을 직접 넣어보니 앞바퀴가
+                # 왼쪽으로 돌았다 -> +angle = 좌회전. 아래 자전거 모델이 쓰는
+                # REP-103(+ = 좌회전)과 규약이 같으므로 뒤집을 필요가 없다 -> 1.0.
                 # (RViz 에서 예측 경로가 실제와 반대로 휘면 이 부호를 뒤집을 것)
-                ("angle_sign", -1.0),
+                ("angle_sign", 1.0),
                 # --- 예측 경로 ---
                 ("plan_horizon_sec", 2.0),
                 ("plan_dt", 0.1),
@@ -97,10 +94,6 @@ class VizNode(Node):
                 # --- 지나온 궤적 ---
                 ("driven_path_max_poses", 2000),
                 ("driven_path_min_step_m", 0.05),
-                # --- 복도 중앙선 (my_obstacle 과 같은 값을 넣어야 미터 환산이 맞다) ---
-                ("corridor.px_per_meter", 300.0),
-                ("corridor.eval_near_m", 0.6),
-                ("corridor.eval_far_m", 1.5),
                 # odom 토픽이 이 시간 동안 안 오면 추측항법으로 전환
                 ("odom_timeout_sec", 1.0),
             ],
@@ -121,9 +114,6 @@ class VizNode(Node):
         self.plan_min_speed = float(p("plan_min_speed_mps").value)
         self.driven_max = int(p("driven_path_max_poses").value)
         self.driven_step = float(p("driven_path_min_step_m").value)
-        self.px_per_meter = float(p("corridor.px_per_meter").value)
-        self.eval_near_m = float(p("corridor.eval_near_m").value)
-        self.eval_far_m = float(p("corridor.eval_far_m").value)
         self.odom_timeout = float(p("odom_timeout_sec").value)
 
         sensor_qos = QoSProfile(
@@ -131,17 +121,8 @@ class VizNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=1,
         )
-        reliable_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
-        )
-
         # --- 상태 ---
         self._state = None            # /debug_state JSON
-        self._corridor = None         # [off_near, off_far, valid, quality]
-        self._obstacle = None         # [front, left_free, right_free]
-        self._corridor_path = None    # my_obstacle 이 낸 복도 중앙선
         self._last_odom_time = None   # 외부 odom 수신 시각 (None 이면 추측항법)
         self._x = 0.0
         self._y = 0.0
@@ -155,17 +136,9 @@ class VizNode(Node):
         self.create_subscription(
             Odometry, p("odom_topic").value, self.on_odom, sensor_qos)
         self.create_subscription(String, "debug_state", self.on_state, 10)
-        self.create_subscription(
-            Float32MultiArray, "corridor", self.on_corridor, reliable_qos)
-        self.create_subscription(
-            Float32MultiArray, "obstacle", self.on_obstacle, reliable_qos)
-        # my_obstacle 이 낸 복도 중앙선. 여기서는 색만 입혀 다시 그린다
-        # (기하는 그쪽이 계산한 것을 그대로 쓴다 — 판단/계산 중복 금지).
-        self.create_subscription(Path, "corridor_path", self.on_corridor_path, 1)
 
         # --- 발행 ---
         self.pub_cloud = self.create_publisher(PointCloud2, "/viz/scan_cloud", sensor_qos)
-        self.pub_ref = self.create_publisher(Path, "/viz/ref_path", 1)
         self.pub_plan = self.create_publisher(Path, "/viz/plan_path", 1)
         self.pub_driven = self.create_publisher(Path, "/viz/driven_path", 1)
         self.pub_odom = self.create_publisher(Odometry, "/viz/odom", 10)
@@ -211,15 +184,6 @@ class VizNode(Node):
         except (json.JSONDecodeError, TypeError):
             pass
 
-    def on_corridor(self, msg):
-        self._corridor = list(msg.data)
-
-    def on_obstacle(self, msg):
-        self._obstacle = list(msg.data)
-
-    def on_corridor_path(self, msg):
-        self._corridor_path = msg
-
     # ------------------------------------------------------------------ 주기
 
     def _dead_reckoning(self):
@@ -254,7 +218,6 @@ class VizNode(Node):
 
         self._publish_driven_path(now)
         self._publish_plan_path(now, steer, v)
-        self._publish_ref_path(now)
         self._publish_markers(now)
 
     # ------------------------------------------------------------------ 발행
@@ -326,22 +289,6 @@ class VizNode(Node):
             pts.append((x, y, yaw))
         self.pub_plan.publish(self._path(now, self.base_frame, pts))
 
-    def _publish_ref_path(self, now):
-        """복도 중앙선. 픽셀 오프셋을 미터로 되돌린다(부호 규약은 corridor.py 와 동일).
-
-        corridor.py:  offset_px = -y_center_m * px_per_meter   =>  y = -px / ppm
-        """
-        c = self._corridor
-        if not c or len(c) < 3 or c[2] < 0.5 or self.px_per_meter <= 0.0:
-            self.pub_ref.publish(self._path(now, self.base_frame, []))
-            return
-        y_near = -c[0] / self.px_per_meter
-        y_far = -c[1] / self.px_per_meter
-        pts = [(0.0, 0.0, 0.0),
-               (self.eval_near_m, y_near, 0.0),
-               (self.eval_far_m, y_far, 0.0)]
-        self.pub_ref.publish(self._path(now, self.base_frame, pts))
-
     def _marker(self, now, ns, mid, mtype, frame=None):
         m = Marker()
         m.header.stamp = now.to_msg()
@@ -362,8 +309,11 @@ class VizNode(Node):
         text.pose.position.x = 0.0
         text.pose.position.z = 0.8
         text.scale.z = 0.12
-        text.color.r = text.color.g = text.color.b = 1.0
         s = self._state
+        # 지금 무엇을 따르고 있는지를 **색**으로 먼저 보여준다.
+        # 노랑=카메라 차선, 빨강=라바콘 구간(rubbercone_node).
+        r, g, b = (_CONE_COLOR if (s or {}).get("cone_zone") else _LANE_COLOR)
+        text.color.r, text.color.g, text.color.b = r, g, b
         if s is None:
             text.text = "waiting /debug_state ..."
         else:
@@ -386,17 +336,7 @@ class VizNode(Node):
             )
         arr.markers.append(text)
 
-        # 2) 전방 최근접 거리 표식
-        front = self._marker(now, "front", 1, Marker.SPHERE)
-        front.scale.x = front.scale.y = front.scale.z = 0.12
-        front.color.r = 1.0
-        front.color.g = 0.2
-        front.color.b = 0.2
-        d = self._obstacle[0] if self._obstacle else 0.0
-        front.pose.position.x = float(d)
-        arr.markers.append(front)
-
-        # 3) 차체 외형 (대략) — 스케일 감을 잡기 위한 것
+        # 2) 차체 외형 (대략) — 스케일 감을 잡기 위한 것
         body = self._marker(now, "body", 2, Marker.CUBE)
         body.scale.x = 0.50
         body.scale.y = 0.28
@@ -408,21 +348,6 @@ class VizNode(Node):
         body.color.b = 1.0
         body.color.a = 0.4
         arr.markers.append(body)
-
-        # 4) 지금 무엇을 따르고 있는지 — 복도 중앙선을 **기준별 색**으로 덧그린다.
-        #    숫자(w=0.62)보다 색이 먼저 눈에 들어온다. 콘 구간 진입/이탈이
-        #    한눈에 보여야 튜닝 중 판단이 빨라진다.
-        mode = self._marker(now, "mode", 3, Marker.LINE_STRIP,
-                            frame=(self._corridor_path.header.frame_id
-                                   if self._corridor_path else None))
-        mode.scale.x = 0.04
-        r, g, b = (_CONE_COLOR if (s or {}).get("cone_zone")
-                   else _LANE_COLOR)
-        mode.color.r, mode.color.g, mode.color.b = r, g, b
-        if self._corridor_path is not None:
-            for pose in self._corridor_path.poses:
-                mode.points.append(pose.pose.position)
-        arr.markers.append(mode)
 
         self.pub_markers.publish(arr)
 

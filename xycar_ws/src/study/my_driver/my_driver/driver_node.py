@@ -71,8 +71,8 @@ px_per_meter(300.0)는 실측 전 값이라, 라이다가 죽었을 때 **검증
 추정치로 콘 사이를 계속 달리는** 구조였다. 콘 구간에서 멈추는 벌점보다
 콘을 치거나 코스를 이탈하는 쪽이 나쁘다고 판단해 통째로 들어냈다.
 
-obstacle_node 는 계속 /corridor·/obstacle 을 발행하지만 아무도 구독하지
-않는다 (RViz 시각화 /corridor_path 만 viz_node 가 쓴다).
+obstacle_node 자체를 지웠다 (2026-08-21). 시각화만을 위해 라이다 복도 추정을
+상시 돌릴 이유가 없다. 라이다를 쓰는 노드는 rubbercone_node 하나뿐이다.
 """
 
 import json
@@ -273,8 +273,9 @@ class DriverNode(Node):
         )
 
         self.obs = Obs()
-        # 마지막 융합 결과. 로그에서 어느 기준을 쓰고 있는지 보여주는 용도.
-        self._ref = FusedResult()
+        # 마지막 횡방향 기준. 로그·시각화가 읽는다.
+        # (융합을 걷어낸 뒤로는 항상 차선이 출처라 LaneRef 하나면 된다.)
+        self._ref = LaneRef()
         self._enabled = not self.require_enable
         self._last_lane_time = None
         self._lane_lost_since = None

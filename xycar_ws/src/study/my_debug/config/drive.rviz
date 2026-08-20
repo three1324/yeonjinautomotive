@@ -11,10 +11,11 @@
 #   Odometry /viz/odom      ← 차량 위치/자세
 #   Path /viz/driven_path   ← 지나온 궤적 (흰색)
 #   Path /viz/plan_path     ← 현재 명령의 예측 경로 (초록)
-#   Path /viz/ref_path      ← 라바콘 복도 중앙선 = 추종 기준 (노랑)
-#   MarkerArray /viz/markers ← FSM 상태 텍스트 / 전방거리 / 차체 / 추종기준 색선
-#   Path /corridor_path     ← 라바콘 복도 중앙선 (my_obstacle 이 계산, 하늘색)
-#   MarkerArray /cone_walls ← 벽으로 채택된 콘 점 (좌 초록 / 우 빨강) + 중앙선
+#   MarkerArray /viz/markers ← FSM 상태 텍스트(노랑=차선 / 빨강=라바콘) + 차체
+#
+# 라이다에서 나온 복도 중앙선(/viz/ref_path, /corridor_path, /cone_walls)은
+# 전부 뺐다 — obstacle_node 를 지웠기 때문이다(2026-08-21). 라이다를 쓰는
+# 노드는 rubbercone_node 하나뿐이고, 그 시각화는 /rubbercone/debug_image 에 있다.
 #
 # 데이터가 안 보이면 좌측 트리에서 해당 Display 의 Topic 이 실제 토픽명과 같은지,
 # Fixed Frame(odom) TF 가 오고 있는지 먼저 확인할 것.
@@ -214,70 +215,6 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /viz/plan_path
-      Value: true
-    - Alpha: 1
-      Buffer Length: 1
-      Class: rviz_default_plugins/Path
-      Color: 255; 255; 0
-      Enabled: true
-      Head Diameter: 0
-      Head Length: 0
-      Length: 0.3
-      Line Style: Billboards
-      Line Width: 0.04
-      Name: ref path (/viz/ref_path)
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Pose Style: None
-      Radius: 0.03
-      Shaft Diameter: 0.1
-      Shaft Length: 0.1
-      Topic:
-        Depth: 1
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /viz/ref_path
-      Value: true
-    - Alpha: 1
-      Buffer Length: 1
-      Class: rviz_default_plugins/Path
-      Color: 0; 200; 255
-      Enabled: true
-      Head Diameter: 0
-      Head Length: 0
-      Length: 0.3
-      Line Style: Billboards
-      Line Width: 0.03
-      Name: corridor path (/corridor_path)
-      Offset:
-        X: 0
-        Y: 0
-        Z: 0
-      Pose Style: None
-      Radius: 0.03
-      Shaft Diameter: 0.1
-      Shaft Length: 0.1
-      Topic:
-        Depth: 1
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /corridor_path
-      Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
-      Name: cone walls (/cone_walls)
-      Namespaces:
-        {}
-      Topic:
-        Depth: 1
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /cone_walls
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true

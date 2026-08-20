@@ -18,12 +18,11 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='라이다 섹터 거리 관측',
+    description='라바콘 구간 전담 주행 (라이다). 라이다를 쓰는 노드는 이것 하나뿐이다.',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'obstacle_node = my_obstacle.obstacle_node:main',
             'rubbercone_node = my_obstacle.rubbercone_node:main',
         ],
     },
