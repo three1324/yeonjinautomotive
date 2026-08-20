@@ -65,40 +65,33 @@
 ```
 E:\자율주행\auto\
 ├── README.md                 ← 이 문서
-├── amd.zip                   원본 차량 홈디렉토리 백업 (복구용, 건드리지 말 것)
-├── amd/                      amd.zip에서 필요한 것만 추린 작업 트리
-│   ├── xycar_ws/src/         ★ 메인 colcon 워크스페이스
-│   │   ├── study/            ★ 우리가 새로 작성하는 패키지들
-│   │   │   ├── my_perception/   카메라 인식 (YOLO) + models/best5.pt
-│   │   │   │                    tools/offline_check.py (영상으로 검증)
-│   │   │   ├── my_obstacle/     라이다 섹터 거리
-│   │   │   ├── my_driver/       판단(FSM)·제어
-│   │   │   │                    tools/sim_check.py (폐루프 시뮬)
-│   │   │   ├── my_slam/         매핑/측위 + waypoint 도구
-│   │   │   ├── my_debug/        주행 시각화. pipeline_view_node(카메라 시점, OpenCV) +
-│   │   │   │                    viz_node(공간 시점, RViz2 피더) + config/drive.rviz
-│   │   │   │                    (drive*.launch.py 에 rviz:=true / debug:=true)
-│   │   │   ├── my_bringup/      ★ 통합 launch + config/drive_params.yaml
-│   │   │   │                    (모든 튜닝 파라미터가 여기 한 파일에)
-│   │   │   ├── DEPLOY_AMD.md    ★ AMD 차량(서울대 대회)에 이 폴더째 복사하는 절차
-│   │   │   └── VEHICLE_TEST.md ★ 실차 연결 테스트 체크리스트 (차 꽂기 전에 열 것)
-│   │   ├── xycar_motor/      ★ VESC 모터 노드 (ROS1→ROS2 이식 완료)
-│   │   ├── vesc/             f1tenth/vesc (ros2 브랜치) — 그대로 사용
-│   │   ├── xycar_device/     센서 드라이버 (cam/lidar/imu/ultrasonic/msgs)
-│   │   └── yolo_ros/         YOLO ROS 래퍼 (기존)
-│   ├── noetic_ws/src/        ROS1 원본 (이식 참고용, 빌드 대상 아님)
-│   │   └── vesc, xycar_motor, my_motor
-│   └── Desktop/              센서·시뮬 참고 소스
-│       ├── sllidar_ros2, rf2o_laser_odometry, shortcut_slam, xycar_simulator
-├── xycar_ws/src/         ★ AMD 차량 벤더 워크스페이스 (amd.zip 원본 그대로 + study)
-│   ├── study/                 amd/xycar_ws/src/study 와 동일 (my_perception 등 6개)
-│   ├── track_drive/           조직위 벤더 원본 (미수정)
-│   ├── xycar_application/     조직위 벤더 원본, app_* 데모 10개 (미수정)
-│   ├── xycar_device/          조직위 벤더 원본 (미수정)
-│   ├── yolo_ros/              조직위 벤더 원본 (미수정, .git 제거)
-│   └── VENDORED.md            ★ 이 워크스페이스를 amd/xycar_ws/ 와 분리한 이유
-└── reference/                문서·자료 (빌드 대상 아님)
+├── xycar_ws/src/             ★ 젯슨 실차 워크스페이스 — 여기서 colcon build 한다
+│   ├── study/                ★ 우리가 작성한 패키지 (이 폴더만 우리 코드)
+│   │   ├── my_perception/       카메라 인식 (YOLO11n-seg) + models/best5.pt(.engine)
+│   │   │                        tools/offline_check.py (영상으로 검증)
+│   │   ├── my_obstacle/         라이다. obstacle_node(시각화용) +
+│   │   │                        rubbercone_node(★ 라바콘 구간 주행 전담)
+│   │   ├── my_driver/           판단(FSM)·제어 + 라바콘 구간 mux
+│   │   │                        tools/sim_check.py (폐루프 시뮬)
+│   │   ├── my_slam/             매핑/측위 + waypoint 도구 (기본 off)
+│   │   ├── my_debug/            시각화. pipeline_view_node(카메라 시점) +
+│   │   │                        viz_node(RViz2 피더) + video_pub_node(영상 재생)
+│   │   ├── my_bringup/       ★ 통합 launch + config/drive_params.yaml
+│   │   │                        (모든 튜닝 파라미터가 여기 한 파일에)
+│   │   ├── VEHICLE_TEST.md   ★ 실차 테스트 체크리스트 (차 꽂기 전에 열 것)
+│   │   └── SESSION_LOG.md       실차에서 무엇이 왜 문제였나의 기록
+│   ├── rf2o_laser_odometry/     라이다 오도메트리 (my_slam 전용, 외부 소스)
+│   ├── xycar_device/            조직위 벤더 원본 (cam/lidar/imu/ultrasonic/msgs)
+│   ├── yolo_ros/                조직위 벤더 원본
+│   ├── track_drive/             조직위 벤더 원본
+│   ├── xycar_application/       조직위 벤더 데모 app_* 10개
+│   └── VENDORED.md              벤더 패키지 출처·수정 이력
+├── JETSON_ROS1_DOCKER_MOTOR.md  ★ 모터(ROS1 도커) 구축 절차
+├── motor_ros1_bundle.zip        그 도커에 넣을 ROS1 소스 (vesc + xycar_motor)
+├── amd.zip                      원본 차량 홈디렉토리 백업 (복구용, 건드리지 말 것)
+└── reference/                   문서·자료 (빌드 대상 아님)
     ├── perception_analysis.md   ★ 인식 성능 실측 분석 (설계 근거의 원천)
+    ├── tuning_guide.md
     ├── docs/모터제어기_VESC_설정방법.pdf
     ├── vesc/                    VESC 펌웨어·설정 백업
     └── videos/                  차선인식 튜닝용 주행영상
@@ -456,7 +449,7 @@ my_driver/
 젯슨 없이 실제 주행영상으로 바로 튜닝할 수 있다.
 
 ```bash
-cd amd/xycar_ws/src/study/my_perception
+cd xycar_ws/src/study/my_perception
 python3 tools/offline_check.py <영상.mp4> --every 15
 ```
 
@@ -478,7 +471,7 @@ python3 tools/offline_check.py <영상.mp4> --every 15
 ### 파라미터 정합성 검사 (Windows에서, ROS 없이) ★ 젯슨에 올리기 전 필수
 
 ```bash
-cd amd/xycar_ws/src/study/my_bringup
+cd xycar_ws/src/study/my_bringup
 python3 tools/check_params.py
 ```
 
@@ -492,7 +485,7 @@ python3 tools/check_params.py
 `my_driver` 의 판단·제어 모듈도 ROS 의존성이 없어서 폐루프로 돌려볼 수 있다.
 
 ```bash
-cd amd/xycar_ws/src/study/my_driver
+cd xycar_ws/src/study/my_driver
 python3 tools/sim_check.py
 python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.30
 ```
@@ -505,7 +498,7 @@ python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.30
 
 ### 젯슨으로 옮기는 순서
 
-1. `amd/xycar_ws/` 를 보드로 복사 (`build/ install/ log/` 는 제외)
+1. `xycar_ws/` 를 보드로 복사 (`build/ install/ log/` 는 제외)
 2. `cd xycar_ws && rosdep install --from-paths src --ignore-src -r -y`
    - `serial_driver`(transport_drivers), `ackermann_msgs`, `slam_toolbox`,
      `rf2o_laser_odometry`, `robot_localization` 등이 여기서 설치됨
@@ -520,46 +513,12 @@ python3 tools/sim_check.py --k-lat 0.15 --k-curve 0.30
    ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
    ```
 
-### AMD 보드 xycar(서울대 대회 차량)로 옮기는 순서
-
-**같은 소스를 두 차량이 공유한다.** 코드를 복사해 두 벌로 갈라놓지 않았다 —
-대회가 같은 주에 붙어 있어 한쪽 버그 수정이 다른 쪽에 반영되지 않으면 위험하다.
-
-이 차량은 ROS2 Humble 이고 카메라(`/image_raw`)·라이다(`/scan`)·해상도(640×480)·
-모터 토픽(`xycar_motor` `[angle, speed]`, angle ±50)이 젯슨 차량과 **전부 동일**하다.
-다른 점은 두 가지뿐이다:
-
-- **모터 드라이버가 별도 ROS1 도커의 벤더 노드**다. `xycar_motor` 토픽을 상시 구독하고
-  있어서 우리는 발행만 하면 되고, 우리 `xycar_motor`/`vesc` 패키지는 필요 없다
-  (그 차량엔 존재하지도 않는다).
-- **speed 실효 배율이 다르다.** 같은 차량에서 검증된 서울대 코드가 `base_speed` 를
-  12.0 → 4.8 로 낮춰 쓰고 있어 그 값에 맞췄다.
-
-그래서 진입점만 따로 뒀다:
-
-| | 젯슨 (국민대) | AMD (서울대) |
-|---|---|---|
-| launch | `drive.launch.py` | **`drive_amd.launch.py`** |
-| 파라미터 | `drive_params.yaml` | `drive_params.yaml` + **`amd_overrides.yaml`** |
-
-```bash
-scp -r amd/xycar_ws/src/study/ <차량>:~/xycar_ws/src/     # study 폴더만 복사
-# 차량에서
-cd ~/xycar_ws && colcon build --symlink-install && source install/setup.bash
-ros2 launch my_bringup drive_amd.launch.py
-```
-
-⚠️ `race_*` 런치와 동시에 띄우지 말 것 — `race_manager` 도 `xycar_motor` 를 발행한다.
-
-상세 절차·체크리스트·트러블슈팅은 **`amd/xycar_ws/src/study/DEPLOY_AMD.md`**.
-
 ### 실행 명령 요약
 
 | 목적 | 명령 |
 |---|---|
 | 전체 주행 | `ros2 launch my_bringup drive.launch.py` |
 | **전체 주행 + 시각화** | `ros2 launch my_bringup drive.launch.py rviz:=true` |
-| **전체 주행 + 시각화 (AMD)** | `ros2 launch my_bringup drive_amd.launch.py rviz:=true` |
 | 시각화만 (주행 스택이 이미 떠 있을 때) | `ros2 launch my_debug viz.launch.py` |
 | **영상 파일로 실시간 재생 테스트** | `ros2 launch my_bringup replay.launch.py video:=~/test.mp4` |
 | **실차 사전 점검** ★ | `python3 my_bringup/tools/preflight.py` (연결 후 `--live`) |
@@ -594,7 +553,7 @@ video_pub_node → /image_raw → perception_node → /lane /light /objects
 
 **`offline_check.py` 와 뭐가 다른가:** 그쪽은 인지 모듈만 ROS 없이 최대 속도로 돌린다
 (인지 *정확도* 검증). 이쪽은 실시간 재생이라 **보드가 30fps 를 따라가는지**가 드러난다 —
-그건 정확도와 다른 문제고, AMD 차량에서 "가다 멈추고"를 일으킨 바로 그 문제다.
+그건 정확도와 다른 문제고, 실차에서 "가다 멈추고"를 일으킨 바로 그 문제다.
 
 주요 인자:
 
@@ -605,7 +564,6 @@ video_pub_node → /image_raw → perception_node → /lane /light /objects
 | `loop` | `true` | 끝나면 처음부터 다시 |
 | `width`/`height` | `640`/`480` | 발행 해상도. ⚠️ `driver_node.image_width` 와 맞춰야 조향 중심이 안 틀어진다 (테스트 영상이 632px 여도 640 으로 늘려 내보내는 이유) |
 | `rviz` | `true` | RViz2 도 띄울지 |
-| `overrides_file` | (없음) | AMD 차량에서 재생하면 `config/amd_overrides.yaml` 을 줄 것 |
 | `auto_start` | `true` | 신호등 없이 바로 `LANE_DRIVE` 로 시작. ⚠️ 아래 표 |
 | `enable` | `false` | `/drive_enable` 자동 켜기. ⚠️ 아래 표 |
 
@@ -627,7 +585,7 @@ ros2 launch my_bringup replay.launch.py video:=~/test.mp4 enable:=true
 
 `enable:=false`(기본)에서도 인지 계산은 전부 돌고 화면에 나오지만, FSM 이 `disabled`
 경로로 빠져 조향·속도는 0 으로 고정된다. `enable:=true` 는 **모터 스택이 없는 벤치에서만**
-쓸 것 — 특히 AMD 차량은 모터 드라이버 ROS1 도커가 **상시 떠 있으므로**(§3) 이 launch 가
+쓸 것 — 모터 드라이버 ROS1 도커가 **상시 떠 있으므로**(§3) 이 launch 가
 모터를 안 띄워도 `/xycar_motor` 발행만으로 차가 실제로 달린다.
 
 **라이다가 없으므로** `/scan` `/obstacle` `/corridor` 는 오지 않는다. `driver_node` 의
@@ -651,7 +609,7 @@ ros2 launch my_bringup replay.launch.py video:=~/test.mp4 enable:=true
 즉 병목은 **YOLO 추론 45ms** 이고, 그 위에 마스크 후처리(`detect.extract` + 차선 폴리핏)가
 **16ms 를 더 얹는다**(전체의 약 26%, 순수 CPU). 시각화 창은 병목이 아니다.
 `stale_timeout_sec` 은 프레임 주기 ~0.09s 대비 0.5s 라 젯슨에서는 여유가 있지만,
-AMD 차량은 CPU 추론이라 훨씬 느리므로 `amd_overrides.yaml` 의 `1.0` 이 필요한 이유가
+인지가 느려지면(전력모드/`.pt` 폴백) 이 값을 늘려야 하는 이유가
 여기서 재확인된다.
 
 **TensorRT(`best5.engine`)는 실제로 빠르다 — 단 `task='segment'` 를 반드시 줘야 한다.**
@@ -677,7 +635,6 @@ TensorRT/CUDA 버전에 종속돼 다른 장비로 복사할 수 없다(`.gitign
 
 ```bash
 # 이 한 줄이면 주행 스택 + 시각화 창 2개가 모두 뜬다
-ros2 launch my_bringup drive_amd.launch.py rviz:=true      # AMD 차량
 ros2 launch my_bringup drive.launch.py     rviz:=true      # 젯슨 차량
 ```
 
@@ -714,7 +671,7 @@ ros2 launch my_bringup drive.launch.py     rviz:=true      # 젯슨 차량
 `viz_node.odom_topic` 을 `/odom_rf2o` 로 바꾼다 (그러면 추측항법이 자동으로 꺼진다):
 
 ```bash
-ros2 launch my_bringup drive_amd.launch.py rviz:=true slam:=true
+ros2 launch my_bringup drive.launch.py rviz:=true slam:=true
 ```
 
 **튜닝값**은 전부 `my_bringup/config/drive_params.yaml` 의 `viz_node:` 섹션에 있다.
@@ -722,7 +679,7 @@ ros2 launch my_bringup drive_amd.launch.py rviz:=true slam:=true
 길이만 어긋난다(주행에는 영향 없음). 예측 경로가 좌우 **반대**로 휘면 `angle_sign`
 부호를 뒤집을 것.
 
-⚠️ **시각화는 CPU 를 쓴다.** AMD 차량은 YOLO 가 CPU 추론이라 이미 병목이므로,
+⚠️ **시각화는 CPU 를 쓴다.** YOLO 추론이 이미 병목이므로,
 기록 주행·실전에서는 `rviz`/`debug` 를 **둘 다 끄고**(기본값) 돌릴 것.
 
 ### 실차 연결 테스트 — `preflight.py` 부터
@@ -829,7 +786,7 @@ sudo reboot
 **점검 스크립트**
 
 ```bash
-bash amd/xycar_ws/src/xycar_motor/scripts/check_vesc_port.sh
+bash (구) xycar_ws/src/xycar_motor/scripts/check_vesc_port.sh
 ```
 
 포트 탐색 / nvgetty / 권한 / 점유 프로세스 / 실제 열기까지 확인하고,
@@ -946,6 +903,6 @@ ros2 topic echo /lane
 | VESC 설정 절차 (조직위) | `reference/docs/모터제어기_VESC_설정방법.pdf` |
 | VESC 펌웨어·설정 백업 | `reference/vesc/` |
 | 차선 튜닝용 주행영상 | `reference/videos/` |
-| ROS1 원본 (이식 대조용) | `amd/noetic_ws/src/` |
-| 모터 패키지 상세 | `amd/xycar_ws/src/xycar_motor/README.md` |
+| ROS1 원본 (모터 도커용) | `motor_ros1_bundle.zip` (또는 `amd.zip` 안 `noetic_ws/src/`) |
+| 모터 패키지 상세 | `(구) xycar_ws/src/xycar_motor/README.md` |
 | f1tenth VESC 드라이버 | <https://github.com/f1tenth/vesc/tree/ros2> |

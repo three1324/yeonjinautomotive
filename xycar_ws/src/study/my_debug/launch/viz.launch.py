@@ -6,7 +6,7 @@
 
 주행 스택과 한 번에 (권장):
 
-    ros2 launch my_bringup drive_amd.launch.py rviz:=true
+    ros2 launch my_bringup drive.launch.py rviz:=true
 
 뜨는 창은 두 개다. 보는 축이 달라서 둘 다 필요하다.
     1) "xycar pipeline" (OpenCV)  — 카메라 시점. 좌: YOLO 검출 / 우: 차선 추정,

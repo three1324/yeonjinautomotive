@@ -129,7 +129,7 @@ class PerceptionNode(Node):
         self.pub_objects = self.create_publisher(Float32MultiArray, "objects", reliable_qos)
 
         # publish_debug_image=true 일 때만 만든다 — YOLO 는 이미 이 노드의 병목이라
-        # (특히 CUDA 없는 AMD 차량, CPU 추론) 기본값에서는 그리기 비용을 아예 안 낸다.
+        # 기본값에서는 그리기 비용을 아예 안 낸다.
         self.publish_debug_image = self.get_parameter("publish_debug_image").value
         self.pub_debug_image = None
         if self.publish_debug_image:
@@ -165,11 +165,18 @@ class PerceptionNode(Node):
         panel_lane = frame.copy()
         y_near = self.get_parameter("lane.eval_near").value
         y_far = self.get_parameter("lane.eval_far").value
-        cx = width // 2
-        cv2.line(panel_lane, (cx, 0), (cx, height), (255, 0, 0), 1)  # 화면 중심(기준선)
+        # 기준선은 화면 중심이 아니라 **차량 중심**이다.
+        #   target = width/2 + center_bias_px   (lane.py 와 같은 식)
+        # 카메라가 차량 정중앙에 안 달려 있으면 둘이 어긋난다. 예전에는 여기서
+        # width//2 를 그려서, center_bias_px 를 아무리 바꿔도 선이 안 움직였다
+        # (값이 반영 안 되는 줄 알기 딱 좋다). 오프셋도 이 기준으로 재야
+        # 화면의 초록 점이 실제 트랙 중앙(c_near) 위치에 찍힌다.
+        bias = self.estimator.center_bias_px
+        ref_x = int(width / 2.0 + bias)
+        cv2.line(panel_lane, (ref_x, 0), (ref_x, height), (255, 0, 0), 1)
         if lane.valid:
-            near_pt = (int(cx + lane.offset_near), int(y_near))
-            far_pt = (int(cx + lane.offset_far), int(y_far))
+            near_pt = (int(ref_x + lane.offset_near), int(y_near))
+            far_pt = (int(ref_x + lane.offset_far), int(y_far))
             cv2.line(panel_lane, near_pt, far_pt, (0, 255, 0), 2)
             cv2.circle(panel_lane, near_pt, 6, (0, 255, 0), -1)
             cv2.circle(panel_lane, far_pt, 6, (0, 255, 255), -1)
@@ -214,6 +221,13 @@ class PerceptionNode(Node):
         if self.estimator is None:
             self.estimator = self._make_estimator(width, height)
             self.get_logger().info(f"입력 해상도 {width}x{height}")
+
+        # center_bias_px 만 매 프레임 다시 읽는다 — 실차에서 파란 기준선을 보며
+        # 값을 넣어 맞추는 작업이라 재시작을 끼우면 감을 놓친다:
+        #     ros2 param set /perception_node lane.center_bias_px 20.0
+        # 나머지 lane.* 는 피팅 구조에 얽혀 있어 estimator 재생성이 필요하므로
+        # 여기서 갱신하지 않는다(단순 오프셋인 이 값만 예외).
+        self.estimator.center_bias_px = self.get_parameter("lane.center_bias_px").value
 
         result = self.model.predict(frame, conf=self.infer_conf, verbose=False)[0]
         det = extract(

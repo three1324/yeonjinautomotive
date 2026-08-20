@@ -22,8 +22,8 @@
 
 - 조직위가 준 **원본 모터 제어 스택은 ROS1(noetic)** 이다. AMD PC 차량에서
   도커 컨테이너로 돌려 **실제로 잘 동작하던 검증된 구성**이다.
-- 우리는 이걸 ROS2로 포팅했으나(`amd/xycar_ws/src/xycar_motor/`,
-  `amd/xycar_ws/src/vesc/`), 실기기 테스트에서 `/sensors/core` 값이 이상했다
+- 우리는 이걸 ROS2로 포팅했으나(`(구) xycar_ws/src/xycar_motor/`,
+  `(구) xycar_ws/src/vesc/`), 실기기 테스트에서 `/sensors/core` 값이 이상했다
   (§8 참고). 대회가 임박해 **검증된 원본 구성으로 되돌리는 쪽이 안전**하다는
   판단이다.
 
@@ -62,7 +62,7 @@ ls -l /dev/ttyMOTOR      # 심볼릭 링크가 살아 있어야 한다 (→ ttyA
 ```
 
 > 📌 **참고**: ROS2 포팅본 설정 파일
-> `amd/xycar_ws/src/xycar_motor/config/vesc.yaml` 에 "USB 커넥터 물리 손상으로
+> `(구) xycar_ws/src/xycar_motor/config/vesc.yaml` 에 "USB 커넥터 물리 손상으로
 > USB-UART 어댑터(CH340, `/dev/ttyUSB0`) 우회 중"이라는 주석과 `port:
 > /dev/ttyUSB0` 설정이 남아 있다. **이 정보는 철회됐다 — 커넥터는 정상이고 USB
 > 직결로 잘 동작한다.** 그 파일은 이번 ROS1 도커 작업과 무관하므로 신경 쓰지 말 것.

@@ -12,7 +12,7 @@ driver_node 가 항상 내는 /debug_state 를 합쳐 화면에 띄운다.
 
 /debug_image 는 perception_node 가 publish_debug_image:=true 일 때만 낸다
 (CPU 추론 병목이라 기본은 off — 이 노드를 띄운다고 자동으로 켜지지 않는다.
- drive_amd.launch.py debug:=true 로 띄우면 같이 켜준다).
+ drive.launch.py debug:=true 로 띄우면 같이 켜준다).
 """
 
 import json
@@ -101,7 +101,7 @@ class PipelineViewNode(Node):
                 bar,
                 f"4) planning  off={s['off_near']:+.0f}/{s['off_far']:+.0f}px "
                 f"-> target={s.get('target_off', 0):+.0f}px "
-                f"ref[{s['source']}] w={s['corridor_weight']:.2f} "
+                f"{'CONE(lidar)' if s.get('cone_zone') else 'LANE(cam)'} "
                 f"{'OK' if s['valid'] else 'HOLD'}"
                 + (f"  | avoid {_DIR_NAME.get(s.get('ot_dir', 0), '?')} "
                    f"{s.get('ot_amount', 0):.0f}px {s.get('ot_reason', '')}"
@@ -110,11 +110,10 @@ class PipelineViewNode(Node):
             cv2.putText(
                 bar,
                 f"5) control  angle={s['angle']:+.1f}  speed={s['speed']:.1f}  "
-                f"light={s['light']} front={s['front_dist']:.2f}m "
-                # 라이다를 쓰는 구간인지 한눈에 보이게 한다. CONE 표시가 없는데
-                # front 값에 반응해 느려진다면 그건 버그다 (콘 구간 밖에서는
-                # 라이다 상한을 안 쓰기로 했으므로).
-                f"cone={s['cone_n']}{'[ZONE]' if s.get('cone_zone') else ''} "
+                f"light={s['light']} "
+                # 라이다(rubbercone_node)가 몰고 있는 구간인지 한눈에 보이게 한다.
+                f"cone={s['cone_n']}{'[ZONE]' if s.get('cone_zone') else ''}"
+                f"{'' if s.get('use_lidar', True) else ' [LIDAR OFF]'} "
                 f"| {s['reason']}",
                 (10, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.55, _TXT, 1, cv2.LINE_AA)
 

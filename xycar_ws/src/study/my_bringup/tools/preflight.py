@@ -40,7 +40,7 @@ PARAMS = os.path.join(STUDY, "my_bringup", "config", "drive_params.yaml")
 # udev 규칙이 식별하는 USB 칩. README '센서 udev 규칙' 절과 같은 값이어야 한다.
 USB_IDS = {
     "0483:5740": ("VESC (ChibiOS) — 모터 컨트롤러",
-                  "젯슨 차량이면 연결 필요. AMD 차량은 모터가 별도 ROS1 도커라 없어도 정상이다"),
+                  "모터는 별도 ROS1 도커가 잡으므로 VESC 가 안 보여도 정상이다"),
     "10c4:ea60": ("CP2102 — YDLidar",
                   "라이다를 연결할 것. 두 차량 모두 필요하다 (없으면 /scan 이 안 나온다)"),
 }
@@ -153,8 +153,8 @@ def check_gpu_and_model():
             _mark("PASS", "CUDA", f"{torch.cuda.get_device_name(0)} (torch {torch.__version__})")
         else:
             _mark("WARN", "CUDA", f"사용 불가 (torch {torch.__version__}) — CPU 추론",
-                  "젯슨이면 Jetson 용 torch 휠인지 확인. AMD 차량이면 정상이지만,\n"
-                  "CPU 추론은 훨씬 느리므로 driver_node 의 stale_timeout_sec 을 넉넉히 둘 것")
+                  "Jetson 용 torch 휠인지 확인 (일반 PyPI 휠은 CUDA 를 못 잡는다).\n"
+                  "CPU 추론은 훨씬 느려 stale_timeout_sec 을 넘기고 '가다 멈추고' 가 된다")
     except ImportError:
         _mark("WARN", "CUDA", "torch 를 import 할 수 없음",
               "perception_node 는 ultralytics/torch 가 필요하다. pip 설치 확인")

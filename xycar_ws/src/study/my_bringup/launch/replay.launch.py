@@ -12,8 +12,8 @@ my_debug/video_pub_node 가 영상 파일을 /image_raw 로 원래 fps 에 맞�
 
 무엇을 확인할 수 있나:
     - 이 보드가 영상의 fps 를 실제로 따라가는가 (perception_node 로그의 실측 fps).
-      못 따라가면 실차에서 driver_node 가 stale 로 멈춘다 — AMD 차량에서 실제로
-      났던 증상이다(config/amd_overrides.yaml 의 stale_timeout_sec 주석 참고).
+      못 따라가면 실차에서 driver_node 가 stale 로 멈춘다 — 인지가 느린 보드에서
+      실제로 났던 증상이다(drive_params.yaml 의 stale_timeout_sec 주석 참고).
     - 차선 추정·YOLO 검출이 이 영상에서 어떻게 나오는가 (좌/우 2분할 창).
     - FSM/계획/제어가 어떤 값을 내는가 (하단 텍스트 바 + RViz).
 
@@ -25,7 +25,7 @@ front_dist 기본값이 99.0m(=전방 개활)이라 장애물 로직은 그냥 �
     video           재생할 영상 파일 경로 (필수)
     params_file     주 파라미터 yaml   (기본: my_bringup/config/drive_params.yaml)
     overrides_file  덧씌울 yaml        (기본: params_file 과 동일 = 덮어쓰기 없음.
-                    AMD 차량에서 재생할 때는 config/amd_overrides.yaml 을 줄 것)
+                    보드가 느려 재생이 밀리면 stale_timeout_sec 을 늘릴 것)
     model           YOLO 가중치        (기본: my_perception/models/best5.pt)
     loop            끝나면 처음부터 다시 (기본 true)
     rate_scale      재생 배속. 0.5 면 절반 속도로 천천히 본다 (기본 1.0)

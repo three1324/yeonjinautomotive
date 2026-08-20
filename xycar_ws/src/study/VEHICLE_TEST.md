@@ -3,7 +3,7 @@
 > **"지금 차량 연결해서 테스트해보려고"** 하면 이 문서부터 연다.
 > 순서대로 따라가면 되고, 각 단계는 **실패하면 다음으로 넘어가지 않는다.**
 >
-> 관련 문서: 배포 절차는 `DEPLOY_AMD.md`, 파라미터 근거는
+> 관련 문서: 파라미터 근거는
 > `my_bringup/config/drive_params.yaml`, 시각화·재생 테스트는 프로젝트 README §6.
 
 ---
@@ -38,7 +38,7 @@ python3 src/study/my_bringup/tools/preflight.py --live
 | 라이다 | `lsusb \| grep 10c4:ea60` | CP2102 보임 |
 | VESC (젯슨만) | `lsusb \| grep 0483:5740` | ChibiOS 보임 |
 
-AMD 차량은 모터가 **별도 ROS1 도커**라 VESC 가 안 보여도 정상이다.
+모터는 **별도 ROS1 도커**가 잡으므로 VESC 가 안 보여도 정상이다.
 
 ### udev 규칙 — 보드마다 한 번씩
 
@@ -108,16 +108,15 @@ cd ~/xycar_ws && colcon build --symlink-install --packages-select my_perception
 ## 3. 센서만 먼저 (모터 없이)
 
 ```bash
-ros2 launch my_bringup drive.launch.py motor:=false rviz:=true      # 젯슨
-ros2 launch my_bringup drive_amd.launch.py rviz:=true               # AMD
+ros2 launch my_bringup drive.launch.py rviz:=true
 ```
 
 RViz2 와 OpenCV 창이 뜬다. 여기서 확인할 것:
 
 - [ ] `/debug_image` 패널에 **좌 YOLO 박스 / 우 차선** 2분할이 나온다
 - [ ] LaserScan / PointCloud2 가 차 주변에 그려진다
-- [ ] `perception_node` 로그의 **실측 fps** — AMD 차량은 이 값의 역수 2배로
-      `amd_overrides.yaml` 의 `stale_timeout_sec` 을 맞춘다 (안 맞으면 "가다 멈추고" 반복)
+- [ ] `perception_node` 로그의 **실측 fps** — 이 값의 역수보다 `stale_timeout_sec`
+      이 짧으면 매 프레임 "인지 끊김"으로 정지한다 ("가다 멈추고" 반복)
 - [ ] 시각화 텍스트의 `why:` 줄이 `disabled` 인지 확인 (정상. 아직 안 켰으니까)
 
 **차선 오프셋 부호 확인:** 차를 차선 왼쪽에 놓으면 `off` 가 한쪽 부호로, 오른쪽에
@@ -158,8 +157,10 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
 
       RViz 는 Display 의 Reliability Policy 를 Best Effort 로 (`drive.rviz` 는 이미 그렇다).
 
-- [ ] `/scan` 이 살아난 뒤 `/obstacle` `/corridor` 도 오는지 확인
-      (`obstacle_node` 가 이 둘을 낸다. 라이다가 죽어 있으면 둘 다 안 나온다)
+- [ ] `/scan` 이 살아난 뒤 `/cone_cmd` 가 오는지 확인
+      (`rubbercone_node` 가 낸다. 라이다가 죽어 있으면 안 나온다)
+      `/obstacle` `/corridor` 도 `obstacle_node` 가 계속 내지만 **주행에는
+      쓰이지 않는다** — RViz 의 `/corridor_path` 시각화 전용이다.
 
 - [ ] **★ `xycar_motor` 발행자가 하나뿐인지 확인** — 가장 위험한 실수
 
@@ -207,9 +208,9 @@ RViz 에 스캔이 안 보이면 **여기서 멈추고** 아래 3개를 순서�
       [INFO] CONE_ZONE 이탈 — 차선 주행으로 복귀 (exit(cone 0, 1.5s))
       ```
 
-      ⚠️ `CONE_ZONE 인데 /cone_cmd 가 끊겼다` 경고가 뜨면 라이다나 그 노드가
-      죽은 것이다. 차선 주행으로 비상 대체되지만 **콘을 칠 수 있으니**
-      즉시 §3-1 로 라이다를 점검할 것.
+      ⚠️ `CONE_ZONE 인데 /cone_cmd 가 끊겼다` 에러가 뜨면 라이다나 그 노드가
+      죽은 것이다. **차가 정지한다**(2026-08-21 변경 — 차선으로 되돌아가면
+      콘을 치기 때문). 즉시 §3-1 로 라이다를 점검할 것.
 
 - [ ] **콘 구간 밖에서 라이다 간섭이 없는지 확인**
 
@@ -285,13 +286,10 @@ ros2 topic echo /xycar_motor                    # [angle, speed]
 - [ ] **회피 방향** — 차량 모형을 화면 왼쪽에 두면 차가 **오른쪽**으로 붙어야 한다.
       로그의 `ot_dir`(+1=오른쪽)과 실제 이동 방향이 **일치**해야 한다.
       (2026-08-21 이전에는 여기가 반대였다 — `lateral._offset()` 참고)
-- [ ] `speed` 가 예상 범위인지 (젯슨 base 12.0 / AMD base 10.0)
+- [ ] `speed` 가 예상 범위인지 (base 12.0)
 
-⚠️ AMD 차량은 모터 ROS1 도커가 **상시 떠 있으므로** `/xycar_motor` 발행만으로 바퀴가
+⚠️ 모터 ROS1 도커가 **상시 떠 있으므로** `/xycar_motor` 발행만으로 바퀴가
 실제로 돈다. 반드시 들어올린 상태에서 할 것.
-
-⚠️ AMD 차량에 서울대 `race_*` 패키지가 같이 설치돼 있으면 `race_manager` 도
-`/xycar_motor` 를 발행한다. **동시에 띄우면 차가 요동친다** — 하나만 실행할 것.
 
 ---
 
@@ -310,7 +308,7 @@ ros2 topic echo /xycar_motor                    # [angle, speed]
 | 증상 | 먼저 볼 것 |
 |---|---|
 | 차가 안 움직임 | 시각화의 **`why:`** 줄. `disabled`(=`/drive_enable` 안 켬) / `wait`(=`WAIT_LIGHT`, 초록불 대기) / `no_lane_yet` / `stale(..)` / `ref lost` |
-| 가다 멈추기 반복 | `perception_node` 실측 fps vs `stale_timeout_sec`. AMD 는 CPU 추론이라 느리다 |
+| 가다 멈추기 반복 | `perception_node` 실측 fps vs `stale_timeout_sec` (§2-1 전력모드도 확인) |
 | 조향이 반대 | `steer.invert` |
 | 한쪽으로 계속 치우침 | `driver_node.image_width` vs 실제 카메라 폭 (`preflight.py --live` 가 잡아준다) |
 | 라이다 안 보임 | **§3-1 의 ①②③** (로그 → 포트 → QoS 순서). 근거는 §8 |
@@ -448,8 +446,7 @@ Now lidar is scanning...                              (기동 ~2.5초 소요)
 
 ```bash
 # 터미널 1 — 주행 스택 (센서 + 인지/판단. 모터는 안 띄운다)
-ros2 launch my_bringup drive.launch.py motor:=false rviz:=true      # 젯슨
-ros2 launch my_bringup drive_amd.launch.py rviz:=true               # AMD
+ros2 launch my_bringup drive.launch.py rviz:=true
 
 # 터미널 2 — 녹화 (콘 코스 앞에서 시작)
 cd ~ && ros2 bag record -o cone_$(date +%m%d_%H%M) \
