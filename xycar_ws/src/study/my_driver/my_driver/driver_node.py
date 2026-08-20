@@ -160,6 +160,9 @@ class DriverNode(Node):
                 # FSM
                 ("fsm.start_confirm_frames", 5),
                 ("fsm.enable_shortcut", False),
+                ("fsm.shortcut_sec", 12.0),
+                ("fsm.shortcut_confirm_frames", 5),
+                ("lateral.shortcut_half_car_px", 45.0),
                 ("fsm.auto_start", False),
                 # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
                 # 판정을 라이다에 맡겼더니 콘이 없는 곳(벽·기둥)에서도 구간으로
@@ -183,6 +186,7 @@ class DriverNode(Node):
                 ("lateral.cooldown_sec", 1.0),
                 ("lateral.pass_exit_ratio", 0.85),
                 ("lateral.pass_exit_cx_ratio", 0.85),
+                ("lateral.lost_hold_sec", 1.0),
                 # 종방향
                 ("speed.base", 12.0),
                 ("speed.min", 4.0),
@@ -220,6 +224,8 @@ class DriverNode(Node):
         self.fsm = DriveFSM(
             start_confirm_frames=g("fsm.start_confirm_frames").value,
             enable_shortcut=g("fsm.enable_shortcut").value,
+            shortcut_sec=g("fsm.shortcut_sec").value,
+            shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
             auto_start=g("fsm.auto_start").value,
         )
         self.cone_zone = ConeZoneDetector(
@@ -239,8 +245,10 @@ class DriverNode(Node):
                 cooldown_sec=g("lateral.cooldown_sec").value,
                 pass_exit_ratio=g("lateral.pass_exit_ratio").value,
                 pass_exit_cx_ratio=g("lateral.pass_exit_cx_ratio").value,
+                lost_hold_sec=g("lateral.lost_hold_sec").value,
             ),
             enable_overtake=g("lateral.enable_overtake").value,
+            shortcut_half_car_px=g("lateral.shortcut_half_car_px").value,
         )
         self.longitudinal = LongitudinalPlanner(
             base_speed=g("speed.base").value,
@@ -413,7 +421,8 @@ class DriverNode(Node):
             self._pub_debug(self.fsm.state.value, 0.0, 0.0, f"stale({age:.2f}s)")
             return
 
-        state = self.fsm.update(self.obs.light, self.obs.lane_valid)
+        # dt 를 넘겨야 SHORTCUT 유지시간(12초)이 흘러간다.
+        state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
 
         if not self.fsm.should_drive:
             self._publish(0.0, 0.0)
@@ -498,7 +507,9 @@ class DriverNode(Node):
                 self._pub_debug(state.value, 0.0, 0.0, "ref lost")
                 return
 
-        target_offset = self.lateral.update(dt, self.obs, self.image_width)
+        target_offset = self.lateral.update(
+            dt, self.obs, self.image_width,
+            shortcut=(state is State.SHORTCUT))
         self._target_offset = target_offset
         # lateral 을 먼저 돌려야 이번 tick 의 회피 상태가 정해진다.
         # 종방향은 그 결과(기동 중인지)를 받아 감속한다 — 순서가 중요하다.
@@ -568,6 +579,9 @@ class DriverNode(Node):
             # 들어가는 상황을 화면에서 바로 구분하려면 같이 보여야 한다.
             "cone_h": round(self.obs.cone_max_h, 0),
             "zone_why": self.cone_zone.last_reason,
+            # 좌회전(지름길) 남은 시간. 0 이면 그 구간이 아니다. 12초를 눈으로
+            # 세지 않아도 되도록 화면에 띄운다.
+            "shortcut_remain": round(self.fsm.shortcut_remain, 1),
             # 라이다(rubbercone_node)가 몰고 있는 구간인지. 화면에서 바로
             # 구분돼야 "지금 누가 운전 중인가"를 오해하지 않는다.
             "cone_zone": bool(self.cone_zone.active),
@@ -598,7 +612,8 @@ class DriverNode(Node):
             f"[{state.value}] angle={angle:+6.1f} speed={speed:5.1f} | "
             f"off={ref.offset_near:+6.1f}/{ref.offset_far:+6.1f} "
             f"q={ref.quality:.2f} {'OK' if ref.valid else 'HOLD'} | "
-            f"light={LIGHT_NAME.get(self.obs.light, '?')} "
+            f"light={LIGHT_NAME.get(self.obs.light, '?')}"
+            f"{f' LEFT{self.fsm.shortcut_remain:.0f}s' if self.fsm.shortcut_remain > 0 else ''} "
             f"cone={self.obs.cone_n}{'[ZONE]' if self.cone_zone.active else ''} "
             f"ov={ov} | {reason}"
         )

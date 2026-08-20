@@ -39,14 +39,22 @@ class DriveFSM:
     """
 
     def __init__(self, start_confirm_frames=5, enable_shortcut=False,
-                 auto_start=False):
+                 auto_start=False, shortcut_sec=12.0,
+                 shortcut_confirm_frames=5):
         self.start_confirm_frames = start_confirm_frames
         self.enable_shortcut = enable_shortcut
         # 신호등 없이 바로 주행 (실내 튜닝용). 실전에서는 반드시 False.
         self.auto_start = auto_start
+        # 좌회전(지름길) 구간을 몇 초 유지할지. **시간으로 끊는다** — 아래 참고.
+        self.shortcut_sec = shortcut_sec
+        # 좌회전 화살표가 몇 프레임 연속 확정돼야 진입할지. 출발과 같은 이유로
+        # 한 겹 더 확인한다 (진입하면 트랙 왼쪽 끝으로 붙으므로 되돌리기 비싸다).
+        self.shortcut_confirm_frames = shortcut_confirm_frames
 
         self.state = State.LANE_DRIVE if auto_start else State.WAIT_LIGHT
         self._green_count = 0
+        self._left_count = 0
+        self._shortcut_t = 0.0
         self._reason = "init"
 
     @property
@@ -57,10 +65,14 @@ class DriveFSM:
     def reset(self):
         self.state = State.LANE_DRIVE if self.auto_start else State.WAIT_LIGHT
         self._green_count = 0
+        self._left_count = 0
+        self._shortcut_t = 0.0
         self._reason = "reset"
 
-    def update(self, light_state, lane_valid):
+    def update(self, light_state, lane_valid, dt=0.0):
         """프레임당 1회. 새 상태를 반환한다.
+
+        dt: 직전 호출로부터의 경과 시간(초). SHORTCUT 유지시간을 재는 데만 쓴다.
 
         lane_valid: **현재 상태 전이에 쓰지 않는다.** 의도적이다.
             차선을 놓쳤다고 상태를 바꾸면 안 된다 — 콘 구간에서는 차선이 안
@@ -80,22 +92,40 @@ class DriveFSM:
                 self._green_count = 0
 
         elif self.state is State.LANE_DRIVE:
-            # 지름길 분기는 판단 근거(위치 or 신호등)가 확정되면 여기에 붙인다.
-            # 근거 없이 넣으면 오전이·오작동으로 코스를 이탈할 수 있어 기본 비활성.
+            # 좌회전(지름길) 진입. 초록불 출발과 같은 방식으로 연속 확정을 요구한다 —
+            # 진입하면 트랙 왼쪽 끝으로 붙으므로 오검출 한 번에 들어가면 위험하다.
             if self.enable_shortcut and light_state == LIGHT_LEFT:
-                self.state = State.SHORTCUT
-                self._reason = "left arrow"
+                self._left_count += 1
+                if self._left_count >= self.shortcut_confirm_frames:
+                    self.state = State.SHORTCUT
+                    self._shortcut_t = 0.0
+                    self._reason = f"left arrow x{self._left_count}"
+            else:
+                self._left_count = 0
 
         elif self.state is State.SHORTCUT:
-            if light_state != LIGHT_LEFT:
+            # **신호가 사라져도 끝내지 않는다. 시간으로 끊는다.**
+            # 좌회전 구간에 들어가면 신호등이 곧 시야에서 벗어나(지나쳐 버리거나
+            # 각도가 틀어져) LIGHT_LEFT 가 금방 NONE 이 된다. 신호 유지로 끊으면
+            # 구간 초입에서 바로 차선주행으로 돌아가 지름길을 못 탄다.
+            self._shortcut_t += dt
+            if self._shortcut_t >= self.shortcut_sec:
                 self.state = State.LANE_DRIVE
-                self._reason = "shortcut done"
+                self._left_count = 0
+                self._reason = f"shortcut done ({self.shortcut_sec:.0f}s)"
 
         return self.state
 
     def force(self, state, reason="manual"):
         self.state = state
         self._reason = reason
+
+    @property
+    def shortcut_remain(self):
+        """SHORTCUT 남은 시간(초). 다른 상태면 0. 로그·시각화용."""
+        if self.state is not State.SHORTCUT:
+            return 0.0
+        return max(0.0, self.shortcut_sec - self._shortcut_t)
 
     @property
     def should_drive(self):

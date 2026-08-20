@@ -316,6 +316,47 @@ ros2 topic echo /xycar_motor                    # [angle, speed]
 
 ---
 
+## 4-2. 좌회전(지름길) 미션 — 2026-08-21 신규
+
+좌회전 화살표를 보면 **가장 좌측 흰 실선을 따라 12초** 달리고 차선주행으로 복귀한다.
+차량 왼쪽면이 실선에 붙는 위치가 목표다(중심 = 실선 + 반차폭).
+
+**기본은 꺼져 있다.** 켜려면:
+
+```bash
+ros2 param set /driver_node fsm.enable_shortcut true    # 또는 yaml
+```
+
+- [ ] **먼저 반차폭 픽셀값을 맞춘다** — `lateral.shortcut_half_car_px` (기본 45.0 은 예시값)
+
+      ```bash
+      ros2 topic echo /debug_state --once        # half_near 를 읽는다
+      ```
+
+      줄자로 트랙폭 W(m) 을 재고: `shortcut_half_car_px = half_near × (0.15 / (W/2))`
+      예) W=1.2m, half_near=180px → 45px
+
+      ⚠️ 이 값이 0 이면 차량 중심이 실선 위에 와서 **실선을 밟는다.**
+
+- [ ] **진입 확인** — 좌회전 화살표를 보여주고 로그를 본다
+
+      ```
+      [INFO] STATE LANE_DRIVE -> SHORTCUT (left arrow x5)
+      [SHORTCUT] ... light=LEFT LEFT12s ...      <- 남은 시간이 줄어든다
+      [INFO] STATE SHORTCUT -> LANE_DRIVE (shortcut done (12s))
+      ```
+
+      5프레임 연속 확정돼야 진입한다(오검출 한 번으로는 안 들어간다).
+
+- [ ] **신호가 사라져도 12초를 채우는지** — 구간에 들어가면 신호등이 곧 시야를
+      벗어난다. 그때 바로 복귀해 버리면 지름길을 못 탄다. 화살표를 치우고도
+      `LEFT..s` 카운트다운이 계속 도는지 확인.
+
+- [ ] **반폭 미학습 시 안전동작** — `half_near` 가 0 이면(좌우 흰선을 동시에 본
+      적 없음) 실선 위치를 모르므로 **트랙 중앙을 유지**한다. 왼쪽으로 밀지 않는다.
+
+---
+
 ## 5. 저속 주행
 
 - [ ] 직선에서 먼저. 중앙 복귀가 느리면 `steer.k_lat` ↑, 좌우로 진동하면 ↓
