@@ -47,7 +47,7 @@ V_REF = 12.0         # 이 속도를 기준으로 운동 속도를 비례시킨�
 
 # 이 모델에서 정상 주행으로 감당 가능한 최대 곡률.
 # 평형에서 K_STEER * angle = curvature 이므로 angle_limit 을 넘으면 못 따라간다.
-MAX_TRACKABLE_CURVATURE = K_STEER * 50.0
+MAX_TRACKABLE_CURVATURE = K_STEER * 35.0
 
 
 class Obs:
@@ -63,7 +63,7 @@ class Obs:
 def make_controllers(a):
     steering = SteeringController(
         k_lat=a.k_lat, k_curve=a.k_curve, k_damp=a.k_damp,
-        angle_limit=50.0, rate_limit_per_sec=180.0, lpf_alpha=0.45,
+        angle_limit=35.0, rate_limit_per_sec=180.0, lpf_alpha=0.45,
         speed_gain_ref=0.0, invert=False,
     )
     longitudinal = LongitudinalPlanner(
@@ -77,7 +77,8 @@ def make_controllers(a):
                          shift_sec=0.8, pass_sec=1.5, return_sec=1.0),
         enable_overtake=True,
     )
-    speed = SpeedLimiter(accel_per_sec=20.0, decel_per_sec=60.0, speed_limit=27.0)
+    speed = SpeedLimiter(accel_per_sec=20.0, decel_per_sec=60.0,
+                         speed_limit=27.0, kick=7.0)
     return steering, longitudinal, lateral, speed
 
 
@@ -117,7 +118,7 @@ def run(a, offset0, curvature, duration, lane_lost=(), car_at=None, label=""):
         else:
             angle = steering.hold(dt)
 
-        if abs(angle) >= 49.5:
+        if abs(angle) >= 34.5:
             saturated += 1
 
         # 속도가 낮으면 모든 운동이 느려진다 (기하는 그대로, 시간만 늘어남)
@@ -181,9 +182,15 @@ def main():
     for off0 in (50, 150, 300):
         tally(run(a, off0, 0.0, 12.0, label=f"초기 {off0:+}px"))
 
+    # 곡률 시나리오는 **모델의 추종 한계에 연동**한다. 절대값으로 박아두면
+    # angle_limit 을 바꿀 때마다(2026-08-21: 50 -> 35) 한계를 넘는 곡률을
+    # 테스트하게 되고, 그러면 "포화"가 뜨는데 그건 코드 문제가 아니라
+    # 애초에 못 도는 코너를 넣은 것이다.
     print("\n[곡선 추종] 일정 곡률에서 정상상태 오차가 남는가")
-    for curv in (40, 80, 120):
-        tally(run(a, 0.0, curv, 12.0, label=f"곡률 {curv}"))
+    for frac in (0.4, 0.75, 0.95):
+        curv = MAX_TRACKABLE_CURVATURE * frac
+        tally(run(a, 0.0, curv, 12.0,
+                  label=f"곡률 {curv:.0f} (한계의 {frac*100:.0f}%)"))
 
     print("\n[차선 결측] 2~3.5초 구간에서 차선을 놓쳤을 때")
     tally(run(a, 100.0, 0.0, 12.0, lane_lost=((2.0, 3.5),), label="결측 1.5s"))

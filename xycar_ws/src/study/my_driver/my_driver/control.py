@@ -112,12 +112,33 @@ class SteeringController:
 
 
 class SpeedLimiter:
-    """가감속 제한. VESC 쪽에도 램핑이 있지만 명령 단계에서 한 겹 둔다."""
+    """가감속 제한. VESC 쪽에도 램핑이 있지만 명령 단계에서 한 겹 둔다.
 
-    def __init__(self, accel_per_sec, decel_per_sec, speed_limit):
+    ────────────────────────────────────────────────────────────────
+    정지 -> 주행 순간의 kick (2026-08-21)
+
+    센서리스 BLDC 는 저 ERPM 에서 정류 동기를 못 잡는다. 이 차량 상수
+    (speed_to_erpm_gain 4614, speed_weight 0.08)로 환산하면
+
+        speed 4.06 = 1500 ERPM   <- 이 아래가 데드밴드
+        speed 7.00 = 2584 ERPM   <- speed.min 을 여기로 올린 이유(8/19)
+
+    그런데 accel_per_sec=8 로 0 부터 램프하면 speed 가 0->4.06 을 지나는
+    **첫 0.5초가 통째로 데드밴드**다. 모터가 물었다 놨다 하며 "깔짝깔짝"
+    거린다. 그래서 **정지에서 출발하는 순간에만** kick 까지 건너뛰고,
+    그 뒤로는 평소 램프를 탄다.
+
+    ⚠️ kick 은 반드시 데드밴드 위여야 한다. kick=4.0 은 1476 ERPM 이라
+       여전히 데드밴드 안이다 — 그 값으로는 증상이 그대로 남는다.
+       기본값을 speed.min 과 같게 두는 이유가 이것이다.
+    ────────────────────────────────────────────────────────────────
+    """
+
+    def __init__(self, accel_per_sec, decel_per_sec, speed_limit, kick=0.0):
         self.accel = accel_per_sec
         self.decel = decel_per_sec
         self.speed_limit = speed_limit
+        self.kick = kick
         self._cmd = 0.0
 
     def reset(self):
@@ -125,6 +146,14 @@ class SpeedLimiter:
 
     def update(self, dt, target_speed):
         target = _clamp(target_speed, 0.0, self.speed_limit)
+
+        # 정지 상태에서 "가라"는 명령이 처음 들어온 순간: 데드밴드를 건너뛴다.
+        # target 을 넘지는 않게 한다 — 목표가 kick 보다 낮으면 그건 저속으로
+        # 가라는 뜻이므로 억지로 밀어올릴 이유가 없다.
+        if self._cmd <= 0.0 and target > 0.0 and self.kick > 0.0:
+            self._cmd = min(target, self.kick)
+            return self._cmd
+
         if target > self._cmd:
             step = self.accel * max(dt, 1e-3)
             self._cmd = min(target, self._cmd + step)

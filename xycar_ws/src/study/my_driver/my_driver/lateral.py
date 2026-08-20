@@ -131,6 +131,30 @@ class OvertakeBehavior:
         car_on_left = car_cx < image_width / 2.0
         return 1 if car_on_left else -1         # 차가 왼쪽이면 오른쪽으로
 
+    def _offset(self, ratio=1.0):
+        """이번 기동의 목표 오프셋(픽셀). **부호가 _dir 과 반대다.**
+
+        ────────────────────────────────────────────────────────────
+        왜 뒤집나 (2026-08-21 버그 수정)
+
+        offset 의 정의가 `트랙중앙 - 화면중심`(lane.py) 이고, 제어기는
+        `err = offset_near - target_offset` 을 0 으로 몰아간다. 즉 정상상태에서
+        offset_near 가 target_offset 이 된다.
+
+            target_offset > 0  ->  트랙중앙이 화면 오른쪽  ->  차는 트랙 **왼쪽**
+            target_offset < 0  ->                          차는 트랙 **오른쪽**
+
+        그런데 _dir 은 +1 이 "오른쪽으로 피한다"는 뜻이다. 그대로 내보내면
+        오른쪽으로 피하겠다면서 목표는 왼쪽이 된다 — 실차에서 로그에는
+        `start right` 가 찍히는데 차는 방해차량 쪽으로 붙었다.
+
+        _dir 자체는 뒤집지 않는다. +1=오른쪽 이라는 표기가 로그·시각화
+        (`ot_dir`, viz 의 AVOID RIGHT/LEFT)에 이미 쓰이고 있어서, 여기서만
+        좌표 규약으로 변환하는 편이 헷갈리지 않는다.
+        ────────────────────────────────────────────────────────────
+        """
+        return -self._dir * self._amount * ratio
+
     def _shift_amount(self, half_near):
         """이번 기동에서 옆으로 옮길 양(픽셀).
 
@@ -172,7 +196,7 @@ class OvertakeBehavior:
             if ratio >= 1.0:
                 self.phase = OvertakePhase.PASS
                 self._t = 0.0
-            return self._dir * self._amount * ratio
+            return self._offset(ratio)
 
         if self.phase is OvertakePhase.PASS:
             # 시간이 아니라 **관측**으로 끝낸다. 통과에 걸리는 시간은 속도에 따라
@@ -195,7 +219,7 @@ class OvertakeBehavior:
                 self.phase = OvertakePhase.RETURN
                 self._t = 0.0
                 self.last_reason = f"return: {reason}"
-            return self._dir * self._amount
+            return self._offset()
 
         if self.phase is OvertakePhase.RETURN:
             ratio = min(self._t / max(self.return_sec, 1e-3), 1.0)
@@ -206,7 +230,7 @@ class OvertakeBehavior:
                 self._cooldown = self.cooldown_sec
                 self.last_reason = f"done (cooldown {self.cooldown_sec:.1f}s)"
                 return 0.0
-            return self._dir * self._amount * (1.0 - ratio)
+            return self._offset(1.0 - ratio)
 
         return 0.0
 

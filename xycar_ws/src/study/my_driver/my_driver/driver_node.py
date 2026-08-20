@@ -149,6 +149,11 @@ class DriverNode(Node):
                 # 튜닝에 쓴 테스트 영상은 632였으나 실차 기준으로 맞춘다.
                 ("image_width", 640),
                 ("require_enable", True),
+                # 라이다 마스터 스위치. false 면 rubbercone_node 명령을 무시하고
+                # 카메라 단독으로 달린다. **매 tick 읽으므로 재시작 없이 바뀐다:**
+                #     ros2 param set /driver_node use_lidar false
+                # 실차에서 "이상한 게 라이다 때문인가"를 그 자리에서 가르는 용도.
+                ("use_lidar", True),
                 ("stale_timeout_sec", 0.5),
                 ("lane_lost_stop_sec", 2.0),
                 ("log_period_sec", 1.0),
@@ -193,6 +198,7 @@ class DriverNode(Node):
                 ("speed.cone_n_hi", 8.0),
                 ("speed.cone_factor_min", 0.6),
                 ("speed.overtake_factor", 0.7),
+                ("speed.kick", 7.0),
                 # 조향
                 ("steer.k_lat", 0.10),
                 ("steer.k_curve", 0.06),
@@ -263,6 +269,7 @@ class DriverNode(Node):
             accel_per_sec=g("speed.accel_per_sec").value,
             decel_per_sec=g("speed.decel_per_sec").value,
             speed_limit=g("speed.limit").value,
+            kick=g("speed.kick").value,
         )
 
         self.obs = Obs()
@@ -427,11 +434,29 @@ class DriverNode(Node):
             self._last_cone_cmd_time is not None
             and (now - self._last_cone_cmd_time).nanoseconds / 1e9 <= self.cone_cmd_timeout
         )
-        if in_cone_zone and cone_cmd_fresh:
+
+        # ── 라이다 마스터 스위치 ──
+        # 매 tick 읽는다. 재시작 없이 끄고 켤 수 있어야 실차에서 "지금 이상한
+        # 게 라이다 때문인가"를 그 자리에서 가를 수 있다:
+        #     ros2 param set /driver_node use_lidar false
+        # 구간 판정(cone_zone)은 계속 돌려둔다 — 로그·시각화에 근거가 남아야
+        # 나중에 "그때 콘 구간이긴 했나"를 확인할 수 있다. 제어에 쓰는 값만 끊는다.
+        # ⚠️ false 면 라바콘 구간을 라이다 없이 지나가게 된다. 콘 벽이 차선보다
+        #    안쪽이라 차선만으로는 콘을 칠 수 있다 — 진단용이지 주행 모드가 아니다.
+        use_lidar = self.get_parameter("use_lidar").value
+
+        if use_lidar and in_cone_zone and cone_cmd_fresh:
             self._drive_cone_zone(dt, state)
             return
 
-        if in_cone_zone:
+        if in_cone_zone and not use_lidar:
+            # 라이다를 **의도적으로** 껐다. 이때는 정지시키지 않는다 —
+            # 아래 차선 주행으로 그대로 흘려보낸다. 끈 사람이 그걸 원한 것이다.
+            self.get_logger().warn(
+                "CONE_ZONE 이지만 use_lidar=false — 차선만으로 통과 시도 "
+                "(콘 접촉 위험)", throttle_duration_sec=2.0)
+
+        elif in_cone_zone:
             # 콘 구간인데 명령이 안 온다 = rubbercone_node 가 죽었거나 라이다가 끊겼다.
             # **정지한다.** 차선으로 되돌아가면 콘을 친다 — 우측 콘 벽이 흰 실선보다
             # 안쪽이라 차선 중심을 따라가는 것 자체가 콘으로 들어가는 길이다.
@@ -449,7 +474,8 @@ class DriverNode(Node):
                 f"CONE_ZONE 이탈 — 차선 주행으로 복귀 ({self.cone_zone.last_reason})")
             self._last_source = "lane"
 
-        # 여기 도달했다 = 콘 구간이 아니다. 횡방향 기준은 **차선 단독**이다.
+        # 여기 도달했다 = 콘 구간이 아니거나, 콘 구간이지만 use_lidar 를 껐다.
+        # 어느 쪽이든 횡방향 기준은 **차선 단독**이다.
         # 라이다(복도)를 섞던 fusion 은 제거했다 — 모듈 docstring 참고.
         ref = LaneRef(self.obs.offset_near, self.obs.offset_far,
                       self.obs.lane_valid, self.obs.quality)
@@ -544,6 +570,7 @@ class DriverNode(Node):
             # 라이다(rubbercone_node)가 몰고 있는 구간인지. 화면에서 바로
             # 구분돼야 "지금 누가 운전 중인가"를 오해하지 않는다.
             "cone_zone": bool(self.cone_zone.active),
+            "use_lidar": bool(self.get_parameter("use_lidar").value),
             # 라이다 쪽 판정. 제어에는 안 쓰지만, 카메라 판정과 얼마나
             # 어긋나는지 화면에서 바로 보이게 같이 싣는다.
             "zone_lidar": bool(self._cone_zone_from_node),

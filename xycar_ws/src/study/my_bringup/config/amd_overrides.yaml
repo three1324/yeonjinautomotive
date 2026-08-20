@@ -67,8 +67,16 @@ driver_node:
     # **이 파일에 steer 섹션을 추가해서** 덮을 것 (젯슨 값을 건드리지 말 것).
     steer:
       # [실측 2026-08-18] AMD 차량 실차 테스트에서 조향이 반대로 나옴 확인.
-      # drive_params.yaml 기본값(false)은 젯슨 차량 기준. 원인은 차량마다 다를 수
-      # 있다 — 카메라 offset 부호 규약, 서보 링키지 방향, 또는 ROS1 벤더
-      # xycar_motor.py 가 auto_drive_vesc() 에서 -steer_val 로 한 번 더 뒤집는 것
-      # 등. 원인 규명보다 실측이 우선이라 여기서 바로 뒤집는다.
+      # 원인은 차량마다 다를 수 있다 — 카메라 offset 부호 규약, 서보 링키지
+      # 방향, 또는 ROS1 벤더 xycar_motor.py 가 auto_drive_vesc() 에서
+      # -steer_val 로 한 번 더 뒤집는 것 등.
+      #
+      # ★ 2026-08-21, 젯슨 쪽 base 가 true -> false 로 되돌아갔지만
+      #   **여기는 일부러 true 로 둔다.**
+      #   이 값은 8/18 에 AMD 차량에서 독립적으로 측정한 것이다. 당시 base 는
+      #   false 였고 AMD 는 그 반대여야 해서 true 를 넣었다. base 가 false 로
+      #   돌아온 지금 true 를 유지하면 **AMD 동작은 그때 측정값 그대로**다.
+      #   여기까지 false 로 바꾸면 아무도 측정한 적 없는 동작이 된다.
+      #   (참고: base 가 true 였던 8/19~8/21 동안은 이 override 가 무의미했다.)
+      #   AMD 차량을 다시 쓸 일이 생기면 VEHICLE_TEST §4-0 으로 재확인할 것.
       invert: true
