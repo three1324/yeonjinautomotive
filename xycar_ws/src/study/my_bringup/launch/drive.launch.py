@@ -27,7 +27,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, GroupAction,
+                            IncludeLaunchDescription)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (LaunchConfiguration, OrSubstitution,
@@ -95,15 +96,26 @@ def generate_launch_description():
     #    이 그대로 넘어간다. 거기엔 xycar_lidar_node 항목이 없어서 노드가
     #    컴파일 기본값(/dev/ydlidar, 230400)으로 뜨고 "cannot bind to the specified
     #    serial port" 로 죽는다. 그래서 여기서 라이다 yaml 을 명시적으로 못박는다.
-    lidar = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(PathJoinSubstitution(
-            [FindPackageShare('xycar_lidar'), 'launch', 'xycar_lidar.launch.py'])),
-        launch_arguments={
-            'params_file': PathJoinSubstitution(
-                [FindPackageShare('xycar_lidar'), 'params', 'ydlidar.yaml']),
-        }.items(),
-        condition=IfCondition(use_sensors),
-    )
+    #
+    # ★ 반드시 GroupAction(scoped=True) 로 감싼다 (2026-08-21).
+    #   IncludeLaunchDescription 의 launch_arguments 는 **현재 스코프에**
+    #   SetLaunchConfiguration 을 깔아버린다. 감싸지 않으면 여기서 못박은
+    #   ydlidar.yaml 이 params_file 을 통째로 덮어써서, 아래에 오는 우리 노드
+    #   4개(perception/obstacle/rubbercone/driver)까지 전부 ydlidar.yaml 을
+    #   받는다. 그러면 drive_params.yaml 의 값이 하나도 안 들어가고 전부
+    #   코드 기본값으로 뜬다 — 예컨대 rubbercone_node 의 drive_topic 이
+    #   기본값 'xycar_motor' 로 남아 driver_node 와 둘이 모터 토픽에 쏘고,
+    #   콘 구간이 아닌데도 차가 라이다 명령대로 움직인다. 실제로 그렇게 됐다.
+    lidar = GroupAction([
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(PathJoinSubstitution(
+                [FindPackageShare('xycar_lidar'), 'launch', 'xycar_lidar.launch.py'])),
+            launch_arguments={
+                'params_file': PathJoinSubstitution(
+                    [FindPackageShare('xycar_lidar'), 'params', 'ydlidar.yaml']),
+            }.items(),
+        ),
+    ], scoped=True, forwarding=True, condition=IfCondition(use_sensors))
 
     # --- ROS2 판 모터 스택 (기본 꺼짐) ---
     # 이 차량의 모터는 ROS1 도커가 잡는다(§8-(3)). 여기를 켜면 포트가 충돌한다.
@@ -131,13 +143,9 @@ def generate_launch_description():
             'publish_debug_image': ParameterValue(show_debug_image, value_type=bool),
         }],
     )
-    obstacle = Node(
-        package='my_obstacle',
-        executable='obstacle_node',
-        name='obstacle_node',
-        output='screen',
-        parameters=[params_file],
-    )
+    # ※ obstacle_node 는 없다 (2026-08-21 삭제). 라이다 복도 추정/섹터 거리는
+    #   주행에 쓰지 않기로 했고, 시각화만을 위해 라이다를 상시 돌릴 이유가 없다.
+    #   라이다를 쓰는 노드는 아래 rubbercone_node 하나뿐이다.
     # --- 라바콘 구간 전담 (팀원 실차 검증 구현을 그대로 가져온 노드) ---
     # 스스로 구간을 판정하고 조향·속도까지 만든다. driver_node 는 구간일 때
     # 그 명령(/cone_cmd)을 그대로 통과시키기만 한다.
@@ -172,4 +180,4 @@ def generate_launch_description():
     )
 
     return LaunchDescription(args + [cam, lidar, motor, slam,
-                                     perception, obstacle, rubbercone, driver, viz])
+                                     perception, rubbercone, driver, viz])

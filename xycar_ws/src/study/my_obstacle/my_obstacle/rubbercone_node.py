@@ -17,9 +17,15 @@ class RubberconeNode(Node):
 
         # ---- 공통 ----
         self.declare_parameter('scan_topic', 'scan')
-        self.declare_parameter('drive_topic', 'xycar_motor')  # decision_node 생기면 변경
+        # ★ 기본값은 절대 'xycar_motor' 로 두지 않는다 (2026-08-21).
+        #   원본 기본값이 모터 토픽이었다. params 파일이 한 번이라도 안 실리면
+        #   이 노드가 driver_node 와 같이 모터에 쏘게 되고, 콘 구간이 아닌
+        #   곳에서도 차가 라이다 명령대로 움직인다. 실제로 launch 의
+        #   params_file 누수(drive.launch.py 참고)로 그 일이 벌어졌다.
+        #   우리 시스템에서 모터에 쏘는 노드는 driver_node 하나뿐이다.
+        self.declare_parameter('drive_topic', 'cone_cmd')
         self.declare_parameter('debug_topic', '/rubbercone/debug_image')
-        self.declare_parameter('zone_topic', '/rubbercone/zone_active')
+        self.declare_parameter('zone_topic', '/cone_zone_active')
 
         # ---- 좌표계 보정 (실측 필요, 오늘 라이다 검증 때 쓰던 것과 동일) ----
         self.declare_parameter('angle_offset_deg', 0.0)

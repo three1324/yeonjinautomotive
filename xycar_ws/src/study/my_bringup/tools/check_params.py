@@ -35,7 +35,7 @@ STUDY = os.path.normpath(os.path.join(HERE, "..", ".."))
 CONFIG = os.path.join(STUDY, "my_bringup", "config", "drive_params.yaml")
 NODES = [
     ("perception_node", "my_perception/my_perception/perception_node.py"),
-    ("obstacle_node", "my_obstacle/my_obstacle/obstacle_node.py"),
+    ("rubbercone_node", "my_obstacle/my_obstacle/rubbercone_node.py"),
     ("driver_node", "my_driver/my_driver/driver_node.py"),
     ("viz_node", "my_debug/my_debug/viz_node.py"),
 ]
@@ -54,12 +54,19 @@ def flatten(d, prefix=""):
 
 
 def declared_names(path):
-    """노드 소스의 declare_parameters(...) 블록에서 파라미터 이름을 뽑는다."""
+    """노드 소스에서 선언된 파라미터 이름을 뽑는다.
+
+    두 가지 작성 방식을 모두 본다:
+        declare_parameters(namespace="", parameters=[("a.b", 1), ...])
+        declare_parameter('a', 1)          # rubbercone_node 가 이 방식이다
+    한쪽만 보면 원본 그대로 가져온 노드가 통째로 '미선언'으로 잡힌다.
+    """
     src = open(path, encoding="utf-8").read()
-    if "declare_parameters(" not in src:
-        return set()
-    body = src.split("declare_parameters(", 1)[1]
-    return set(re.findall(r'\("([^"]+)",', body))
+    names = set(re.findall(r"declare_parameter\(\s*['\"]([^'\"]+)['\"]", src))
+    if "declare_parameters(" in src:
+        body = src.split("declare_parameters(", 1)[1]
+        names |= set(re.findall(r'\("([^"]+)",', body))
+    return names
 
 
 def main():

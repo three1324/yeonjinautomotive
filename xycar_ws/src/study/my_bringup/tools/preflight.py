@@ -398,6 +398,23 @@ def check_live(seconds):
     start = node.get_clock().now()
     while (node.get_clock().now() - start).nanoseconds / 1e9 < seconds:
         rclpy.spin_once(node, timeout_sec=0.1)
+
+    # 모터 토픽 발행자는 **driver_node 하나뿐**이어야 한다 (2026-08-21).
+    # rubbercone_node 가 여기에 같이 쏘면 콘 구간이 아닌 곳에서도 라이다
+    # 명령대로 차가 움직인다. 실제로 launch 의 params_file 누수로 그렇게 됐다.
+    motor_pubs = [(n, ns) for n, ns in
+                  {(i.node_name, i.node_namespace)
+                   for i in node.get_publishers_info_by_topic("/xycar_motor")}]
+    if len(motor_pubs) > 1:
+        _mark("FAIL", "/xycar_motor 발행자",
+              "발행자가 " + str(len(motor_pubs)) + "개: "
+              + ", ".join(sorted(n for n, _ in motor_pubs)),
+              "driver_node 하나만 모터에 쏴야 한다.\n"
+              "rubbercone_node 가 끼어 있으면 params 가 안 실린 것이다:\n"
+              "  ros2 param get /rubbercone_node drive_topic   → cone_cmd 여야 한다")
+    elif motor_pubs:
+        _mark("PASS", "/xycar_motor 발행자", motor_pubs[0][0] + " 단독")
+
     node.destroy_node()
     rclpy.shutdown()
 

@@ -17,9 +17,14 @@ my_debug/video_pub_node 가 영상 파일을 /image_raw 로 원래 fps 에 맞�
     - 차선 추정·YOLO 검출이 이 영상에서 어떻게 나오는가 (좌/우 2분할 창).
     - FSM/계획/제어가 어떤 값을 내는가 (하단 텍스트 바 + RViz).
 
-라이다가 없으므로 /scan /obstacle /corridor 는 오지 않는다. driver_node 의
-front_dist 기본값이 99.0m(=전방 개활)이라 장애물 로직은 그냥 놀고, 차선추종만
-검증된다. 그래서 obstacle_node 는 아예 띄우지 않는다.
+기본값에서는 라이다가 없으므로 /scan 도 /cone_cmd 도 오지 않는다. driver_node 는
+콘 구간을 카메라(YOLO 콘 개수/크기)로만 판정하므로, 그때는 차선추종 경로만 돌고
+콘 구간 분기는 타지 않는다.
+
+**lidar:=true** 를 주면 영상은 파일로 재생하면서 **라이다만 실물 실시간**으로
+쓴다 (라이다 드라이버 + rubbercone_node 를 같이 띄운다). 카메라 앞에 코스가 없어도
+책상 위 콘으로 라바콘 구간 동작을 볼 수 있다. 단, 화면(영상)과 라이다(실제 방)는
+서로 다른 장면이라 **구간 진입 판정은 영상 쪽 콘 개수**로 난다는 점을 기억할 것.
 
 인자:
     video           재생할 영상 파일 경로 (필수)
@@ -33,6 +38,7 @@ front_dist 기본값이 99.0m(=전방 개활)이라 장애물 로직은 그냥 �
                     예: 테스트영상의 방해차량 회피 구간은 frame 2700 부근
     width/height    발행 해상도. 0 이면 원본 그대로 (기본 640x480 — driver_node 의
                     image_width 와 맞춰야 조향 중심이 안 틀어진다)
+    lidar           실물 라이다 + rubbercone_node 를 같이 띄울지 (기본 false)
     rviz            RViz2 도 띄울지 (기본 true)
     auto_start      신호등 없이 바로 LANE_DRIVE 로 시작할지 (기본 true)
     enable          /drive_enable 을 자동으로 켤지 (기본 false)
@@ -62,7 +68,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, ExecuteProcess,
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, GroupAction,
                             IncludeLaunchDescription, TimerAction)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -102,6 +108,7 @@ def generate_launch_description():
     overrides_file = LaunchConfiguration('overrides_file')
     use_rviz = LaunchConfiguration('rviz')
     use_enable = LaunchConfiguration('enable')
+    use_lidar = LaunchConfiguration('lidar')
 
     args = [
         DeclareLaunchArgument('video', description='재생할 영상 파일 경로 (필수)'),
@@ -116,6 +123,8 @@ def generate_launch_description():
         DeclareLaunchArgument('width', default_value='640'),
         DeclareLaunchArgument('height', default_value='480'),
         DeclareLaunchArgument('rviz', default_value='true'),
+        # 영상은 파일, 라이다는 실물 — 반쪽 벤치 테스트용.
+        DeclareLaunchArgument('lidar', default_value='false'),
         # 실차 launch(drive*.launch.py)의 기본값은 그대로 false 다. 여기서만 뒤집는다 —
         # 재생 테스트용 영상에는 보통 신호등이 없어서, false 면 WAIT_LIGHT 에서 멈춘 채
         # 아무것도 안 보인다(그게 "왜 안 움직이지?"의 1번 원인).
@@ -138,6 +147,31 @@ def generate_launch_description():
             'width': LaunchConfiguration('width'),
             'height': LaunchConfiguration('height'),
         }],
+    )
+
+    # --- 실물 라이다 (lidar:=true 일 때만) ---
+    # drive.launch.py 와 같은 이유로 GroupAction(scoped=True) 로 감싼다 —
+    # 감싸지 않으면 여기서 못박은 ydlidar.yaml 이 params_file 을 덮어써서
+    # 아래 노드들이 전부 엉뚱한 yaml 을 받는다 (2026-08-21 실제 사고).
+    lidar = GroupAction([
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(PathJoinSubstitution(
+                [FindPackageShare('xycar_lidar'), 'launch', 'xycar_lidar.launch.py'])),
+            launch_arguments={
+                'params_file': PathJoinSubstitution(
+                    [FindPackageShare('xycar_lidar'), 'params', 'ydlidar.yaml']),
+            }.items(),
+        ),
+    ], scoped=True, forwarding=True, condition=IfCondition(use_lidar))
+
+    # 라바콘 구간 전담. 라이다를 쓰는 노드는 이것 하나뿐이다.
+    rubbercone = Node(
+        package='my_obstacle',
+        executable='rubbercone_node',
+        name='rubbercone_node',
+        output='screen',
+        parameters=common_params,
+        condition=IfCondition(use_lidar),
     )
 
     perception = Node(
@@ -173,8 +207,8 @@ def generate_launch_description():
             'rviz': use_rviz,
             'pipeline_view': 'true',
             'params_file': params_file,
-            # 라이다가 없으니 base_link->laser_frame TF 는 의미가 없다.
-            'laser_tf': 'false',
+            # 라이다를 안 띄우면 base_link->laser_frame TF 는 의미가 없다.
+            'laser_tf': use_lidar,
         }.items(),
     )
 
@@ -189,4 +223,5 @@ def generate_launch_description():
         condition=IfCondition(use_enable),
     )
 
-    return LaunchDescription(args + [video_pub, perception, driver, viz, enable])
+    return LaunchDescription(args + [lidar, video_pub, perception, rubbercone,
+                                     driver, viz, enable])
