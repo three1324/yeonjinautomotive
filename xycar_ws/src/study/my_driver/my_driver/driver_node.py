@@ -163,6 +163,7 @@ class DriverNode(Node):
                 ("fsm.shortcut_sec", 12.0),
                 ("fsm.shortcut_confirm_frames", 5),
                 ("lateral.shortcut_half_car_px", 45.0),
+                ("lateral.shortcut_margin_px", 20.0),
                 ("fsm.auto_start", False),
                 # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
                 # 판정을 라이다에 맡겼더니 콘이 없는 곳(벽·기둥)에서도 구간으로
@@ -202,6 +203,7 @@ class DriverNode(Node):
                 ("speed.cone_n_hi", 8.0),
                 ("speed.cone_factor_min", 0.6),
                 ("speed.overtake_factor", 0.7),
+                ("speed.car_detect_factor", 0.7),
                 ("speed.kick", 7.0),
                 # 조향
                 ("steer.k_lat", 0.10),
@@ -249,7 +251,10 @@ class DriverNode(Node):
             ),
             enable_overtake=g("lateral.enable_overtake").value,
             shortcut_half_car_px=g("lateral.shortcut_half_car_px").value,
+            shortcut_margin_px=g("lateral.shortcut_margin_px").value,
         )
+        # 콘 구간 속도 하한에도 쓴다 (_drive_cone_zone 참고).
+        self.speed_min = g("speed.min").value
         self.longitudinal = LongitudinalPlanner(
             base_speed=g("speed.base").value,
             min_speed=g("speed.min").value,
@@ -262,6 +267,7 @@ class DriverNode(Node):
             cone_n_hi=g("speed.cone_n_hi").value,
             cone_factor_min=g("speed.cone_factor_min").value,
             overtake_factor=g("speed.overtake_factor").value,
+            car_detect_factor=g("speed.car_detect_factor").value,
         )
         self.steering = SteeringController(
             k_lat=g("steer.k_lat").value,
@@ -507,6 +513,12 @@ class DriverNode(Node):
                 self._pub_debug(state.value, 0.0, 0.0, "ref lost")
                 return
 
+        # 좌회전 목표는 실차에서 화면 보며 맞추는 값이라 매 tick 다시 읽는다:
+        #     ros2 param set /driver_node lateral.shortcut_half_car_px 90.0
+        #     ros2 param set /driver_node lateral.shortcut_margin_px 30.0
+        self.lateral.shortcut_half_car_px = g("lateral.shortcut_half_car_px").value
+        self.lateral.shortcut_margin_px = g("lateral.shortcut_margin_px").value
+
         target_offset = self.lateral.update(
             dt, self.obs, self.image_width,
             shortcut=(state is State.SHORTCUT))
@@ -517,6 +529,7 @@ class DriverNode(Node):
             ref.valid, ref.offset_near, ref.offset_far,
             ref.quality, self.obs.cone_n,
             overtake_active=self.lateral.overtake.active,
+            car_ahead=self.obs.car_present,
         )
         speed = self.speed_limiter.update(dt, target_speed)
 
@@ -545,6 +558,21 @@ class DriverNode(Node):
         없으므로 여기서 씌운다.
         """
         angle, cone_speed = self._cone_cmd
+
+        # ── 저속 데드밴드 하한 (2026-08-21 실차: 콘 구간에서 모터가 잠겼다) ──
+        # rubbercone_node 는 조향각에 비례해 감속한다:
+        #     speed = base_speed(6.0) x max(min_speed_ratio(0.4), 1-|angle|/limit)
+        # S자에서 조향이 커지면 speed 2.4 까지 떨어지는데, 이 차량 상수
+        # (gain 4614 x weight 0.08)로는 886 ERPM 이다. 센서리스 BLDC 가
+        # 정류 동기를 못 잡는 1500 ERPM(=speed 4.06) 한참 아래라 **모터가 잠긴다.**
+        # 차선 주행 쪽은 longitudinal 이 v = max(v, min_speed) 로 이미 막고 있는데,
+        # 이 경로는 rubbercone 명령을 그대로 통과시키느라 그 보호가 빠져 있었다.
+        # SpeedLimiter 는 가감속·상한만 걸고 **하한이 없다.**
+        #
+        # 0 은 그대로 둔다 — 그건 "서라"는 뜻이라 눌러 올리면 안 된다.
+        if cone_speed > 0.0:
+            cone_speed = max(cone_speed, self.speed_min)
+
         speed = self.speed_limiter.update(dt, cone_speed)
 
         # 조향기 내부 상태를 실제 출력에 맞춰둔다. 구간을 빠져나가 우리 제어로
@@ -582,6 +610,9 @@ class DriverNode(Node):
             # 좌회전(지름길) 남은 시간. 0 이면 그 구간이 아니다. 12초를 눈으로
             # 세지 않아도 되도록 화면에 띄운다.
             "shortcut_remain": round(self.fsm.shortcut_remain, 1),
+            # 좌회전 목표가 좌측 실선에서 얼마나 안쪽인지(px). 양수면 안쪽(정상),
+            # 0 이면 차량 왼쪽면이 실선 위, 음수면 실선을 넘는다.
+            "shortcut_inset": round(self.obs.half_near - self._target_offset, 1),
             # 라이다(rubbercone_node)가 몰고 있는 구간인지. 화면에서 바로
             # 구분돼야 "지금 누가 운전 중인가"를 오해하지 않는다.
             "cone_zone": bool(self.cone_zone.active),

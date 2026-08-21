@@ -40,6 +40,7 @@ class LongitudinalPlanner:
         quality_lo, quality_factor_min,
         cone_n_lo, cone_n_hi, cone_factor_min,
         overtake_factor=0.7,
+        car_detect_factor=0.7,
     ):
         self.base_speed = base_speed
         self.min_speed = min_speed
@@ -63,6 +64,12 @@ class LongitudinalPlanner:
         # 이 구간에서 우리가 가진 유일한 전방 정보는 카메라 bbox 뿐이라
         # (라이다 상한을 제거했다 — 모듈 docstring 참고) 명시적으로 눌러둔다.
         self.overtake_factor = overtake_factor
+        # 방해차량을 **본 순간**부터 감속한다 (기동 시작 전).
+        # [2026-08-21 실차] 회피가 잘 안 됐다. 원인은 접근 속도다 — 트리거가
+        # 걸릴 때(bbox 하단 y >= 300px)는 이미 꽤 가까운데, 그 속도로는
+        # shift_sec(0.8s) 동안 옆으로 벌리기 전에 차에 닿는다.
+        # 탐지 시점부터 늦추면 벌릴 시간과 거리가 생긴다.
+        self.car_detect_factor = car_detect_factor
 
         self.last_reason = ""
 
@@ -75,8 +82,12 @@ class LongitudinalPlanner:
         return None
 
     def update(self, lane_valid, offset_near, offset_far, quality,
-               cone_n, overtake_active=False):
-        """목표 속도를 반환한다 (xycar_motor 의 speed 단위)."""
+               cone_n, overtake_active=False, car_ahead=False):
+        """목표 속도를 반환한다 (xycar_motor 의 speed 단위).
+
+        car_ahead: 방해차량이 **보이는가** (기동 중인지와 무관). 탐지만으로도
+                   감속한다 — car_detect_factor 주석 참고.
+        """
         v = self.base_speed
         reasons = []
 
@@ -103,10 +114,20 @@ class LongitudinalPlanner:
             reasons.append(f"cone(x{cone_n})")
         v *= f
 
-        # 4) 회피 기동 중 — 트랙 반쪽에 붙어 달리는 중이라 여유가 없다
+        # 4) 방해차량 관련 감속.
+        #    두 요인을 곱하지 않고 **더 센 쪽 하나만** 쓴다. 곱하면
+        #    0.7 x 0.7 = 0.49 로 과하게 느려져 랩타임만 잃는다.
+        f = 1.0
+        why = None
         if overtake_active:
-            v *= self.overtake_factor
-            reasons.append("overtake")
+            f = self.overtake_factor
+            why = "overtake"
+        if car_ahead and self.car_detect_factor < f:
+            f = self.car_detect_factor
+            why = "car ahead"
+        if why is not None:
+            v *= f
+            reasons.append(why)
 
         if v > 0.0:
             v = max(v, self.min_speed)

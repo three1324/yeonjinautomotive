@@ -257,12 +257,18 @@ class LateralPlanner:
     """횡방향 목표 오프셋을 최종 결정한다."""
 
     def __init__(self, overtake: OvertakeBehavior, enable_overtake=True,
-                 shortcut_half_car_px=45.0):
+                 shortcut_half_car_px=45.0, shortcut_margin_px=0.0):
         self.overtake = overtake
         self.enable_overtake = enable_overtake
         # 좌회전(지름길) 구간에서 좌측 실선으로부터 안쪽으로 띄울 양(픽셀).
         # **반차폭**이다 — 차량 왼쪽면이 실선에 닿는 위치를 목표로 삼는다.
         self.shortcut_half_car_px = shortcut_half_car_px
+        # 실선에서 **추가로** 더 띄울 안전여유(픽셀).
+        # [2026-08-21] 반차폭만 쓰면 설계상 여유가 정확히 0 이다 — 차량 왼쪽면이
+        # 실선에 딱 붙는다. shortcut_half_car_px 를 실제보다 조금만 작게 잡아도
+        # 차량 왼쪽면이 실선을 **넘어간다**(실차에서 "왼쪽으로 나간다"고 보인 것이
+        # 이것이다). 인지 오차·차체 롤까지 있으니 여유를 명시적으로 둔다.
+        self.shortcut_margin_px = shortcut_margin_px
 
     def shortcut_target(self, half_near):
         """좌회전 구간 목표 오프셋 — 가장 좌측 흰 실선을 따라간다.
@@ -286,9 +292,15 @@ class LateralPlanner:
 
         두 식을 맞추면:
 
-            target = half_near - 반차폭
+            target = half_near - 반차폭 - 여유
 
-        검산: 반차폭 0 이면 target = half_near -> 차량중심이 실선 위. 맞다.
+        검산: 반차폭·여유 0 이면 target = half_near -> 차량중심이 실선 위. 맞다.
+
+        **부호 확인 (2026-08-21 재검증)**: target 이 **클수록** 차는 왼쪽이다
+        (차량중심 = 트랙중앙 - target). 반차폭을 빼면 target 이 작아지므로
+        차는 실선에서 **오른쪽(안쪽)** 으로 온다. 의도대로다.
+        실차에서 왼쪽으로 나갔다면 부호가 아니라 **반차폭 값이 작은 것**이다 —
+        그러면 차량중심은 맞아도 차체 왼쪽면이 실선 밖으로 나간다.
         ────────────────────────────────────────────────────────────
 
         half_near 가 0 이면(좌우 흰선을 아직 동시에 본 적이 없어 반폭 미학습)
@@ -297,7 +309,10 @@ class LateralPlanner:
         """
         if half_near <= 0.0:
             return 0.0
-        return half_near - self.shortcut_half_car_px
+        # 여유를 빼도 트랙 중앙을 넘어 오른쪽으로 가지는 않게 막는다.
+        # (반차폭+여유가 반폭보다 크면 target 이 음수가 되어 오른쪽으로 간다)
+        return max(0.0, half_near - self.shortcut_half_car_px
+                   - self.shortcut_margin_px)
 
     def blend_waypoint(self, target_offset, waypoint_offset, weight):
         """3단계 확장 지점 — 레이싱 라인 반영.
