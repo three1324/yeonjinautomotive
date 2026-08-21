@@ -183,6 +183,7 @@ class DriverNode(Node):
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.shift_px", 120.0),
+                ("lateral.shift_scale", 0.7),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
@@ -243,6 +244,7 @@ class DriverNode(Node):
         self.lateral = LateralPlanner(
             OvertakeBehavior(
                 shift_px=g("lateral.shift_px").value,
+                shift_scale=g("lateral.shift_scale").value,
                 shift_sec=g("lateral.shift_sec").value,
                 pass_sec=g("lateral.pass_sec").value,
                 return_sec=g("lateral.return_sec").value,

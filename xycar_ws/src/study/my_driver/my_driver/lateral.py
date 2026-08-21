@@ -84,8 +84,10 @@ class OvertakeBehavior:
 
     def __init__(self, shift_px,
                  shift_sec, pass_sec, return_sec,
-                 cooldown_sec=1.0, lost_hold_sec=2.0):
+                 cooldown_sec=1.0, lost_hold_sec=2.0, shift_scale=0.7):
         self.shift_px = shift_px                    # 반폭 미학습 시 폴백값 (픽셀)
+        # 회피량 배율. [2026-08-21 실차] 반폭/2 로는 과하게 벌어져 0.7 로 줄였다.
+        self.shift_scale = shift_scale
         self.shift_sec = shift_sec
         self.return_sec = return_sec
         self.cooldown_sec = cooldown_sec            # 복귀 후 재발동 금지 시간
@@ -139,28 +141,26 @@ class OvertakeBehavior:
         return 1 if car_on_left else -1         # 차가 왼쪽이면 오른쪽으로
 
     def _offset(self, ratio=1.0):
-        """이번 기동의 목표 오프셋(픽셀). **부호가 _dir 과 반대다.**
+        """이번 기동의 목표 오프셋(픽셀). 부호는 _dir 과 **같다**.
 
         ────────────────────────────────────────────────────────────
-        왜 뒤집나 (2026-08-21 버그 수정)
+        부호 이력 — 실차 관측이 최종 근거다
 
-        offset 의 정의가 `트랙중앙 - 화면중심`(lane.py) 이고, 제어기는
-        `err = offset_near - target_offset` 을 0 으로 몰아간다. 즉 정상상태에서
-        offset_near 가 target_offset 이 된다.
+        2026-08-21(1차): 책상에서 offset 규약(`트랙중앙 - 화면중심`)만 보고
+          "_dir=+1(오른쪽 회피)을 그대로 쓰면 목표가 왼쪽이 된다"고 추론해
+          `-self._dir` 로 뒤집었다.
 
-            target_offset > 0  ->  트랙중앙이 화면 오른쪽  ->  차는 트랙 **왼쪽**
-            target_offset < 0  ->                          차는 트랙 **오른쪽**
+        2026-08-21(2차, 실차): 그 상태에서 **차가 반대로 피했다.** 즉 1차
+          추론이 틀렸다. 되돌린다.
 
-        그런데 _dir 은 +1 이 "오른쪽으로 피한다"는 뜻이다. 그대로 내보내면
-        오른쪽으로 피하겠다면서 목표는 왼쪽이 된다 — 실차에서 로그에는
-        `start right` 가 찍히는데 차는 방해차량 쪽으로 붙었다.
-
-        _dir 자체는 뒤집지 않는다. +1=오른쪽 이라는 표기가 로그·시각화
-        (`ot_dir`, viz 의 AVOID RIGHT/LEFT)에 이미 쓰이고 있어서, 여기서만
-        좌표 규약으로 변환하는 편이 헷갈리지 않는다.
+        왜 추론이 틀렸나: offset 부호 규약과 조향 부호 규약(steer.invert)이
+        중간에 한 번 더 뒤집히는데, 그 합성을 책상에서 따라가다 부호를
+        한 번 더 뒤집었다. 이 계통의 부호는 **실차에서만 확정된다** —
+        여기 주석에 남기는 이유가 그것이다. 다음에 또 바꾸고 싶어지면
+        추론이 아니라 차를 굴려보고 바꿀 것.
         ────────────────────────────────────────────────────────────
         """
-        return -self._dir * self._amount * ratio
+        return self._dir * self._amount * ratio
 
     def _shift_amount(self, half_near):
         """이번 기동에서 옆으로 옮길 양(픽셀).
@@ -168,10 +168,13 @@ class OvertakeBehavior:
         트랙 반쪽의 중앙 = 트랙중앙에서 반폭/2 만큼. 반폭을 아직 학습하지
         못했으면(0) 고정값으로 폴백한다 — 근거는 약하지만 아예 못 피하는 것보다는
         낫다는 판단(사용자 결정). 대신 폴백인지 아닌지를 last_reason 에 남긴다.
+
+        마지막에 shift_scale 을 곱한다. [2026-08-21 실차] 반폭/2 는 너무 크게
+        벌어져서 30% 줄였다(scale 0.7). 폴백 경로에도 같이 곱해야 두 경로의
+        크기 감각이 어긋나지 않는다.
         """
-        if half_near > 0.0:
-            return half_near / 2.0
-        return self.shift_px
+        base = half_near / 2.0 if half_near > 0.0 else self.shift_px
+        return base * self.shift_scale
 
     def update(self, dt, car_present, car_cx, car_bottom_y,
                image_width, half_near=0.0):

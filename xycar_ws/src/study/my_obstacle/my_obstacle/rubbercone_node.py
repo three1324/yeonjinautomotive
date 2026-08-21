@@ -92,6 +92,8 @@ class RubberconeNode(Node):
         # ---- Pure Pursuit 조향 ----
         self.declare_parameter('wheelbase_m', 0.26)   # 실측 필요
         self.declare_parameter('lookahead_min_m', 0.3)
+        # 라이다 -> 뒷축 거리(m). Pure Pursuit 는 **뒷축 기준** 식이다.
+        self.declare_parameter('lidar_to_rear_axle_m', 0.30)
         self.declare_parameter('steer_gain', 120.0)   # rad -> angle 스케일 (시뮬레이션 값, 실차 재튜닝 필요)
         self.declare_parameter('angle_limit', 50.0)
         self.declare_parameter('invert_steer', False)
@@ -145,6 +147,7 @@ class RubberconeNode(Node):
 
         self.wheelbase = p('wheelbase_m').value
         self.lookahead_min = p('lookahead_min_m').value
+        self.lidar_to_rear_axle = p('lidar_to_rear_axle_m').value
         self.steer_gain = p('steer_gain').value
         self.angle_limit = p('angle_limit').value
         self.invert_steer = p('invert_steer').value
@@ -294,6 +297,31 @@ class RubberconeNode(Node):
 
     # ==================== Pure Pursuit 조향 ====================
     def _steer_to_target(self, tx, ty):
+        """목표점(라이다 좌표)으로 향하는 조향각(도).
+
+        ────────────────────────────────────────────────────────────
+        왜 tx 에 lidar_to_rear_axle 을 더하나 (2026-08-21 실차)
+
+        Pure Pursuit 의 delta = atan(2 L sin(alpha) / ld) 는 **뒷축을 원점으로**
+        유도된 식이다. 그런데 tx, ty 는 차 맨 앞에 달린 라이다 좌표다.
+        보정 없이 넣으면 목표점이 실제보다 lidar_to_rear_axle 만큼 **가깝다**고
+        계산되고, 가까울수록 이 식은 조향을 급격히 세게 낸다.
+
+        실차 증상이 정확히 그것이었다 — 콘 페어링과 목표점은 잘 잡히는데
+        차가 아직 게이트 뒤에 있는 상태에서 이미 풀락으로 꺾어 콘을 쳤다.
+
+        보정 전후 (축거 0.333, 횡오차 0.3m):
+            라이다 0.40m -> 35.0도(풀락)  ->  19.0도
+            라이다 0.50m -> 30.4도        ->  15.3도
+        보정을 넣으면 풀락 구간 자체가 사라진다.
+
+        ty 는 보정하지 않는다 — 라이다가 차 중심선 위에 있으면 횡방향
+        오프셋은 0 이다. 중심선에서 벗어나 있으면 angle_offset_deg 가 아니라
+        여기에 횡 보정을 따로 넣어야 한다 (지금은 중심 장착 가정).
+        ────────────────────────────────────────────────────────────
+        """
+        # 라이다 좌표 -> 뒷축 좌표
+        tx = tx + self.lidar_to_rear_axle
         dist = math.hypot(tx, ty)
         if dist < 1e-3:
             return 0.0
