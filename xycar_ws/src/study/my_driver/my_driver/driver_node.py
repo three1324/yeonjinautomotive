@@ -85,7 +85,7 @@ from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
 from my_driver.control import SpeedLimiter, SteeringController
 from my_driver.cone_zone import ConeZoneDetector
-from my_driver.fsm import DriveFSM, State
+from my_driver.fsm import DriveFSM, ShortcutPhase, State
 from my_driver.lateral import LateralPlanner, OvertakeBehavior
 from my_driver.longitudinal import LongitudinalPlanner
 
@@ -163,13 +163,19 @@ class DriverNode(Node):
                 # FSM
                 ("fsm.start_confirm_frames", 3),
                 ("fsm.enable_shortcut", False),
-                ("fsm.shortcut_sec", 12.0),
+                # 좌회전(지름길) 진입 — 신호 확정 후 arm_sec 만큼 평소대로 달린
+                # 뒤, turn_sec 동안 고정 조향으로 꺾고 차선주행으로 돌아온다.
+                ("fsm.shortcut_arm_sec", 1.5),
+                ("fsm.shortcut_turn_sec", 1.0),
                 ("fsm.shortcut_confirm_frames", 3),
+                # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
+                # 부호: control.py 규약상 양수=우조향이므로 좌회전은 음수.
+                ("shortcut.turn_angle", -35.0),
+                ("shortcut.turn_speed", 10.0),
                 ("fsm.enable_red_stop", True),
                 ("fsm.red_confirm_frames", 3),
                 ("fsm.none_tolerance", 1),
                 ("fsm.red_release_sec", 3.0),
-                ("lateral.shortcut_half_car_px", 45.0),
                 ("fsm.auto_start", False),
                 # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
                 # 판정을 라이다에 맡겼더니 콘이 없는 곳(벽·기둥)에서도 구간으로
@@ -229,7 +235,8 @@ class DriverNode(Node):
         self.fsm = DriveFSM(
             start_confirm_frames=g("fsm.start_confirm_frames").value,
             enable_shortcut=g("fsm.enable_shortcut").value,
-            shortcut_sec=g("fsm.shortcut_sec").value,
+            shortcut_arm_sec=g("fsm.shortcut_arm_sec").value,
+            shortcut_turn_sec=g("fsm.shortcut_turn_sec").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
             enable_red_stop=g("fsm.enable_red_stop").value,
             red_confirm_frames=g("fsm.red_confirm_frames").value,
@@ -255,8 +262,9 @@ class DriverNode(Node):
                 lost_hold_sec=g("lateral.lost_hold_sec").value,
             ),
             enable_overtake=g("lateral.enable_overtake").value,
-            shortcut_half_car_px=g("lateral.shortcut_half_car_px").value,
         )
+        self.shortcut_turn_angle = g("shortcut.turn_angle").value
+        self.shortcut_turn_speed = g("shortcut.turn_speed").value
         self.longitudinal = LongitudinalPlanner(
             base_speed=g("speed.base").value,
             min_speed=g("speed.min").value,
@@ -430,8 +438,19 @@ class DriverNode(Node):
             self._pub_debug(self.fsm.state.value, 0.0, 0.0, f"stale({age:.2f}s)")
             return
 
-        # dt 를 넘겨야 SHORTCUT 유지시간(12초)이 흘러간다.
+        # dt 를 넘겨야 SHORTCUT 위상 시간(ARM/TURN_IN)이 흘러간다.
         state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
+
+        # ── 좌회전(지름길) 꺾기 ──
+        # **인지를 전혀 보지 않는다.** 아래의 콘 구간 mux 도, 차선 소실 정지도
+        # 건너뛴다. 둘 다 여기서는 해가 된다:
+        #   - 분기 초입에서 차선이 끊기거나 엉뚱하게 잡히는데, 그 정지 판정에
+        #     걸리면 **꺾는 도중에 선다.**
+        #   - 콘 구간 판정이 겹치면 rubbercone_node 가 조향을 가져가 버린다.
+        # ARM 위상은 여기서 안 걸린다 — 평소 차선 주행 그대로 아래로 흘러간다.
+        if self.fsm.shortcut_phase is ShortcutPhase.TURN_IN:
+            self._drive_shortcut_turn(dt, state)
+            return
 
         if not self.fsm.should_drive:
             # _publish(0,0) 이 아니라 _halt() 다. _publish 는 모터에 0 만 쏘고
@@ -523,9 +542,7 @@ class DriverNode(Node):
                 self._pub_debug(state.value, 0.0, 0.0, "ref lost")
                 return
 
-        target_offset = self.lateral.update(
-            dt, self.obs, self.image_width,
-            shortcut=(state is State.SHORTCUT))
+        target_offset = self.lateral.update(dt, self.obs, self.image_width)
         self._target_offset = target_offset
         # lateral 을 먼저 돌려야 이번 tick 의 회피 상태가 정해진다.
         # 종방향은 그 결과(기동 중인지)를 받아 감속한다 — 순서가 중요하다.
@@ -546,6 +563,36 @@ class DriverNode(Node):
         self._publish(angle, speed)
         self._log(state, angle, speed, self.longitudinal.last_reason)
         self._pub_debug(state.value, angle, speed, self.longitudinal.last_reason)
+
+    def _drive_shortcut_turn(self, dt, state):
+        """좌회전 진입 — 고정 조향각 + 고정 속도. 인지는 안 본다.
+
+        왜 고정값인가: 분기 초입은 차선이 한쪽만 보이거나 아예 끊긴다. 그
+        상태의 offset 을 믿고 제어하면 꺾다 말고 되돌아온다. 정해진 시간 동안
+        정해진 각도로 도는 것이 유일하게 재현 가능한 방법이다.
+
+        **속도도 같이 고정해야** 회전 반경이 재현된다 — 같은 조향각이라도
+        속도가 다르면 반경이 달라진다. 다만 SpeedLimiter 는 통과시킨다.
+        알고리즘이 아니라 하드웨어 보호다(콘 구간과 같은 이유 — 급가속이
+        배터리 전압을 끌어내려 VESC 가 UNDER_VOLTAGE 로 멈춘다).
+
+        조향은 rate limit 도 안 씌운다. 씌우면 1초짜리 기동에서 목표 각도에
+        닿기도 전에 끝난다. 대신 steering.sync() 로 내부 상태를 맞춰서,
+        차선주행으로 돌아가는 순간 각도가 튀지 않게 한다.
+        """
+        angle = float(self.shortcut_turn_angle)
+        speed = self.speed_limiter.update(dt, self.shortcut_turn_speed)
+        self.steering.sync(angle)
+
+        if self._last_source != "shortcut":
+            self.get_logger().info(
+                f"SHORTCUT/TURN_IN — 고정 조향 {angle:+.1f} 로 좌회전 진입 "
+                f"({self.fsm.shortcut_turn_sec:.1f}s)")
+            self._last_source = "shortcut"
+
+        self._publish(angle, speed)
+        self._log(state, angle, speed, "shortcut(turn_in)")
+        self._pub_debug(state.value, angle, speed, "shortcut(turn_in)")
 
     def _drive_cone_zone(self, dt, state):
         """라바콘 구간 — rubbercone_node 명령을 그대로 통과시킨다.
@@ -595,8 +642,11 @@ class DriverNode(Node):
             # 들어가는 상황을 화면에서 바로 구분하려면 같이 보여야 한다.
             "cone_h": round(self.obs.cone_max_h, 0),
             "zone_why": self.cone_zone.last_reason,
-            # 좌회전(지름길) 남은 시간. 0 이면 그 구간이 아니다. 12초를 눈으로
-            # 세지 않아도 되도록 화면에 띄운다.
+            # 좌회전(지름길) 위상과 그 위상의 남은 시간. 위상이 "-" 면 그
+            # 구간이 아니다. ARM(평소 주행)인지 TURN_IN(고정 조향)인지가
+            # 화면에서 바로 구분돼야 "왜 차선을 무시하나"를 오해하지 않는다.
+            "shortcut_phase": (self.fsm.shortcut_phase.value
+                               if self.fsm.shortcut_phase else "-"),
             "shortcut_remain": round(self.fsm.shortcut_remain, 1),
             # 라이다(rubbercone_node)가 몰고 있는 구간인지. 화면에서 바로
             # 구분돼야 "지금 누가 운전 중인가"를 오해하지 않는다.
@@ -629,7 +679,7 @@ class DriverNode(Node):
             f"off={ref.offset_near:+6.1f}/{ref.offset_far:+6.1f} "
             f"q={ref.quality:.2f} {'OK' if ref.valid else 'HOLD'} | "
             f"light={LIGHT_NAME.get(self.obs.light, '?')}"
-            f"{f' LEFT{self.fsm.shortcut_remain:.0f}s' if self.fsm.shortcut_remain > 0 else ''} "
+            f"{f' LEFT/{self.fsm.shortcut_phase.value}{self.fsm.shortcut_remain:.1f}s' if self.fsm.shortcut_phase else ''} "
             f"cone={self.obs.cone_n}{'[ZONE]' if self.cone_zone.active else ''} "
             f"ov={ov} | {reason}"
         )

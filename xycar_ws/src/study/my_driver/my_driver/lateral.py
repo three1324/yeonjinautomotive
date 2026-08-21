@@ -286,54 +286,9 @@ class OvertakeBehavior:
 class LateralPlanner:
     """횡방향 목표 오프셋을 최종 결정한다."""
 
-    def __init__(self, overtake: OvertakeBehavior, enable_overtake=True,
-                 shortcut_half_car_px=45.0):
+    def __init__(self, overtake: OvertakeBehavior, enable_overtake=True):
         self.overtake = overtake
         self.enable_overtake = enable_overtake
-        # 좌회전(지름길) 구간에서 좌측 실선으로부터 안쪽으로 띄울 양(픽셀).
-        # **반차폭**이다 — 차량 왼쪽면이 실선에 닿는 위치를 목표로 삼는다.
-        #
-        # ⚠️ 이 좌회전 구현은 **재설계 예정**이다 (2026-08-21):
-        #    - 기준선을 학습 반폭 추정이 아니라 **실측 최좌측 실선**으로
-        #    - 목표를 "실선에 딱 붙기"가 아니라 **안쪽 1차선 중앙**으로
-        #    - 유지 시간 12초 -> 3초
-        #    enable_shortcut 이 false 라 지금은 동작하지 않는다.
-        self.shortcut_half_car_px = shortcut_half_car_px
-
-    def shortcut_target(self, half_near):
-        """좌회전 구간 목표 오프셋 — 가장 좌측 흰 실선을 따라간다.
-
-        ────────────────────────────────────────────────────────────
-        유도
-
-        offset 규약은 `트랙중앙 - 차량중심`(lane.py) 이고, 제어기는 정상상태에서
-        offset_near 를 target_offset 으로 만든다. 즉
-
-            target = 트랙중앙 - 차량중심   ->   차량중심 = 트랙중앙 - target
-
-        좌측 실선은 트랙중앙에서 반폭(half_near)만큼 왼쪽이다:
-
-            좌측실선 = 트랙중앙 - half_near
-
-        목표는 **차량 왼쪽면이 그 실선에 붙는 것**이므로 차량중심은 실선에서
-        반차폭만큼 오른쪽이다:
-
-            차량중심 = 좌측실선 + 반차폭 = 트랙중앙 - half_near + 반차폭
-
-        두 식을 맞추면:
-
-            target = half_near - 반차폭
-
-        검산: 반차폭 0 이면 target = half_near -> 차량중심이 실선 위. 맞다.
-        ────────────────────────────────────────────────────────────
-
-        half_near 가 0 이면(좌우 흰선을 아직 동시에 본 적이 없어 반폭 미학습)
-        실선 위치를 모른다. 그때는 **트랙 중앙을 유지**한다 — 근거 없이 왼쪽으로
-        밀면 코스를 이탈한다. 로그에 남으니 자주 뜨면 인지 쪽을 봐야 한다.
-        """
-        if half_near <= 0.0:
-            return 0.0
-        return half_near - self.shortcut_half_car_px
 
     def blend_waypoint(self, target_offset, waypoint_offset, weight):
         """3단계 확장 지점 — 레이싱 라인 반영.
@@ -345,21 +300,14 @@ class LateralPlanner:
             return target_offset
         return (1.0 - weight) * target_offset + weight * waypoint_offset
 
-    def update(self, dt, obs, image_width, shortcut=False):
+    def update(self, dt, obs, image_width):
         """obs: driver_node 가 모아 넘기는 관측 묶음. 목표 오프셋(픽셀) 반환.
 
-        shortcut: 좌회전(지름길) 구간인가. True 면 트랙 중앙 대신 좌측 실선
-                  안쪽을 기준으로 삼는다.
+        좌회전(지름길)은 여기서 다루지 않는다 (2026-08-22 재설계). 진입
+        전(ARM)은 **평소 주행과 완전히 같고**, 꺾는 동안(TURN_IN)은
+        driver_node 가 이 경로를 아예 거치지 않고 고정 조향을 낸다.
         """
         half_near = getattr(obs, "half_near", 0.0)
-
-        if shortcut:
-            # 좌회전 구간에서는 회피를 하지 않는다. 이미 트랙 왼쪽 끝에 붙어
-            # 달리는 중이라 더 옆으로 벌릴 여유가 없고, 12초 안에 구간을
-            # 빠져나가는 것이 우선이다.
-            self.overtake.reset()
-            return self.shortcut_target(half_near)
-
         target = 0.0   # 기본은 트랙 중앙
 
         if self.enable_overtake:
