@@ -15,6 +15,9 @@
        apt 판이 추가로 깔리면 CUDA 없는 버전이 앞서 잡힐 수 있다.
        ultralytics/torch 는 pip 로 설치한다 (Jetson 전용 휠 필요). -->
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
