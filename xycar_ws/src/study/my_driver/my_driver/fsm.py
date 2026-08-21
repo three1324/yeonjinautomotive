@@ -45,6 +45,10 @@ class DriveFSM:
         이 두 번째 "연속" 조건이 영원히 안 채워져 출발을 못 하는 실차 증상이
         나왔다. 미스 한 번에 0 이 아니라 1 만 깎으면, 노이즈는 걸러내면서도
         대체로 맞는 신호에는 계속 다가간다.
+
+        [2026-08-21 재조정] 미스 1번에 -1 은 여전히 민감했다. 미스가
+        **3번 쌓여야 -1** 로 늦췄다 (`_decay3`) — 순간적인 오검출 한두 프레임은
+        아예 무시하고, 진짜로 신호가 바뀐 경우에만 서서히 깎이게 한다.
     """
 
     def __init__(self, start_confirm_frames=5, enable_shortcut=False,
@@ -81,6 +85,9 @@ class DriveFSM:
         self._green_count = 0
         self._left_count = 0
         self._red_count = 0
+        self._green_miss = 0
+        self._left_miss = 0
+        self._red_miss = 0
         self._shortcut_t = 0.0
         self._none_t = 0.0
         self._reason = "init"
@@ -95,9 +102,21 @@ class DriveFSM:
         self._green_count = 0
         self._left_count = 0
         self._red_count = 0
+        self._green_miss = 0
+        self._left_miss = 0
+        self._red_miss = 0
         self._shortcut_t = 0.0
         self._none_t = 0.0
         self._reason = "reset"
+
+    @staticmethod
+    def _decay3(count, miss):
+        """미스가 3번 쌓일 때마다 count 를 1 깎는다. (count, miss) 반환."""
+        miss += 1
+        if miss >= 3:
+            count = max(0, count - 1)
+            miss = 0
+        return count, miss
 
     def update(self, light_state, lane_valid, dt=0.0):
         """프레임당 1회. 새 상태를 반환한다.
@@ -115,12 +134,14 @@ class DriveFSM:
         if self.state is State.WAIT_LIGHT:
             if light_state == LIGHT_GREEN:
                 self._green_count += 1
+                self._green_miss = 0
                 if self._green_count >= self.start_confirm_frames:
                     self.state = State.LANE_DRIVE
                     self._reason = f"green x{self._green_count}"
             else:
-                # 리셋이 아니라 1 감쇠 — 위 클래스 docstring 참고.
-                self._green_count = max(0, self._green_count - 1)
+                # 리셋이 아니라 미스 3번에 1 감쇠 — 위 클래스 docstring 참고.
+                self._green_count, self._green_miss = self._decay3(
+                    self._green_count, self._green_miss)
 
         elif self.state is State.LANE_DRIVE:
             # 주행 중 빨간불 -> 정지. 좌회전 진입보다 **먼저** 본다.
@@ -128,39 +149,46 @@ class DriveFSM:
             # 코드로 못박아 둔다 — 안전 정지가 미션보다 위다.
             if self.enable_red_stop and light_state == LIGHT_RED:
                 self._red_count += 1
+                self._red_miss = 0
                 if self._red_count >= self.red_confirm_frames:
                     self.state = State.STOP_RED
                     self._red_count = 0
+                    self._red_miss = 0
                     self._green_count = 0
+                    self._green_miss = 0
                     self._left_count = 0
+                    self._left_miss = 0
                     self._none_t = 0.0
                     self._reason = f"red x{self.red_confirm_frames}"
                     return self.state
             else:
-                self._red_count = max(0, self._red_count - 1)
+                self._red_count, self._red_miss = self._decay3(
+                    self._red_count, self._red_miss)
 
             # 좌회전(지름길) 진입. 초록불 출발과 같은 방식으로 연속 확정을 요구한다 —
             # 진입하면 트랙 왼쪽 끝으로 붙으므로 오검출 한 번에 들어가면 위험하다.
             if self.enable_shortcut and light_state == LIGHT_LEFT:
                 self._left_count += 1
+                self._left_miss = 0
                 if self._left_count >= self.shortcut_confirm_frames:
                     self.state = State.SHORTCUT
                     self._shortcut_t = 0.0
                     self._reason = f"left arrow x{self._left_count}"
             else:
-                self._left_count = max(0, self._left_count - 1)
+                self._left_count, self._left_miss = self._decay3(
+                    self._left_count, self._left_miss)
 
         elif self.state is State.STOP_RED:
             # 탈출은 두 가지. 어느 쪽도 신호 한 프레임으로는 안 풀린다.
             if light_state == LIGHT_GREEN:
                 self._green_count += 1
+                self._green_miss = 0
                 self._none_t = 0.0
                 if self._green_count >= self.start_confirm_frames:
                     self.state = State.LANE_DRIVE
                     self._green_count = 0
                     self._reason = f"green x{self.start_confirm_frames}"
             elif light_state == LIGHT_NONE:
-                self._green_count = max(0, self._green_count - 1)
                 # 신호등이 **아예 안 보인다**. LightVoter 는 본체를
                 # miss_tolerance 프레임 연속 놓쳐야 NONE 을 내므로, 이건
                 # "신호등이 시야에 없다"는 뜻이지 단발 결측이 아니다.
@@ -173,7 +201,8 @@ class DriveFSM:
                     self._reason = f"red released (no light {self.red_release_sec:.0f}s)"
             else:
                 # RED/YELLOW/LEFT — 아직 신호등이 보이고 초록이 아니다. 선다.
-                self._green_count = max(0, self._green_count - 1)
+                self._green_count, self._green_miss = self._decay3(
+                    self._green_count, self._green_miss)
                 self._none_t = 0.0
 
         elif self.state is State.SHORTCUT:
