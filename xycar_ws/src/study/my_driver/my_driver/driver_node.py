@@ -58,7 +58,9 @@
 라이다는 이 노드에 **한 경로로만** 들어온다 (2026-08-21 정리)
 
     콘 구간 + rubbercone 살아있음  ->  라이다 주행 (_drive_cone_zone)
-    콘 구간 + rubbercone 죽음      ->  **정지**
+    콘 구간 + rubbercone 죽음      ->  **차선 단독으로 통과 시도** (2026-08-21 변경.
+                                        예전엔 여기서 정지했는데, 콘 구간 한복판에서
+                                        서 버리는 쪽이 실차에서 더 나쁘게 걸렸다)
     콘 구간 아님                    ->  차선 단독. 라이다 값을 읽지도 않는다
 
 이전에는 두 개의 비상 경로가 더 있었다: /corridor(복도 추정)를 차선과
@@ -485,24 +487,22 @@ class DriverNode(Node):
 
         elif in_cone_zone:
             # 콘 구간인데 명령이 안 온다 = rubbercone_node 가 죽었거나 라이다가 끊겼다.
-            # **정지한다.** 차선으로 되돌아가면 콘을 친다 — 우측 콘 벽이 흰 실선보다
-            # 안쪽이라 차선 중심을 따라가는 것 자체가 콘으로 들어가는 길이다.
-            # 콘 사이에서 멈추는 벌점이, 콘을 치거나 코스를 이탈하는 것보다 낫다.
-            self.get_logger().error(
-                "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 정지 "
-                "(라이다/rubbercone_node 점검)", throttle_duration_sec=1.0)
-            self._halt()
-            self._log(state, 0.0, 0.0, "cone_cmd lost")
-            self._pub_debug(state.value, 0.0, 0.0, "cone_cmd lost")
-            return
+            # [2026-08-21 제거] 예전에는 여기서 정지했다. 그런데 실차에서는
+            # 콘 구간 한복판에서 서 버리는 쪽이 더 자주/더 나쁘게 걸렸다 —
+            # 차선으로 넘기면 콘을 칠 위험은 있지만, 최소한 차가 멈춰 서서
+            # 미완주로 끝나지는 않는다. 아래 차선 주행으로 그대로 흘려보낸다.
+            self.get_logger().warn(
+                "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 차선만으로 통과 시도 "
+                "(콘 접촉 위험, 라이다/rubbercone_node 점검)",
+                throttle_duration_sec=1.0)
 
         if self._last_source != "lane":
             self.get_logger().info(
                 f"CONE_ZONE 이탈 — 차선 주행으로 복귀 ({self.cone_zone.last_reason})")
             self._last_source = "lane"
 
-        # 여기 도달했다 = 콘 구간이 아니거나, 콘 구간이지만 use_lidar 를 껐다.
-        # 어느 쪽이든 횡방향 기준은 **차선 단독**이다.
+        # 여기 도달했다 = 콘 구간이 아니거나, 콘 구간이지만 use_lidar 를 껐거나,
+        # 콘 구간인데 /cone_cmd 가 끊겼다. 어느 쪽이든 횡방향 기준은 **차선 단독**이다.
         # 라이다(복도)를 섞던 fusion 은 제거했다 — 모듈 docstring 참고.
         ref = LaneRef(self.obs.offset_near, self.obs.offset_far,
                       self.obs.lane_valid, self.obs.quality)
