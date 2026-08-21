@@ -248,6 +248,11 @@ class PerceptionNode(Node):
             float(lane.quality),
             float(lane.half_near),
             float(lane.half_far),
+            # [확장] 오프셋 기준선의 화면 x (= width/2 + center_bias_px).
+            # my_driver 가 트랙중앙 화면좌표(= ref_x + offset_near)를 구해
+            # 방해차량의 좌/우를 판단하는 데 쓴다. 뒤에 붙였으므로 옛
+            # my_driver 와 섞여도 길이 검사로 무시된다.
+            float(lane.ref_x),
         ]))
         self.pub_light.publish(Int32(data=int(state)))
         self.pub_objects.publish(Float32MultiArray(data=[

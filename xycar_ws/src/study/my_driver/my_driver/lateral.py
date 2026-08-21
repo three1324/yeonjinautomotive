@@ -131,13 +131,34 @@ class OvertakeBehavior:
         """+1 오른쪽 / -1 왼쪽 / 0 없음. 진단·시각화용."""
         return self._dir
 
-    def _pick_side(self, car_cx, image_width):
-        """차량 반대쪽으로 피한다. 카메라의 차량 x중심만 본다.
+    def _pick_side(self, car_cx, track_center_x):
+        """방해차량 반대쪽으로 피한다. 기준은 **트랙 중앙**이다.
 
-        라이다 좌/우 여유 확인을 하지 않는 이유는 클래스 주석 참고 —
-        회피량이 트랙 반폭의 절반이라 목표가 항상 트랙 안쪽이다.
+        ────────────────────────────────────────────────────────────
+        왜 화면 중심이 아니라 트랙 중앙인가 (2026-08-21)
+
+        이전에는 `car_cx < image_width/2` 로 판단했다. 그런데 화면 중심은
+        **우리 차의 위치**이지 트랙의 위치가 아니다. 우리가 트랙 한쪽에
+        치우쳐 달리는 동안에는 둘이 크게 어긋난다.
+
+        부호 규약부터 못박아 둔다 (lane.py):
+            offset = 트랙중앙 - 화면중심
+            offset > 0  ->  트랙중앙이 우리 오른쪽  ->  우리는 트랙 **왼쪽**
+
+        예: offset_near = +150 (우리가 트랙 왼쪽에 치우쳐 있다)
+            -> 트랙중앙의 화면 x = 320 + 150 = 470
+            -> 트랙 오른쪽 절반에 있는 차(cx=400)가
+               화면 기준으로는 320 보다 커서 "오른쪽"으로 맞게 보이지만,
+               트랙 왼쪽 절반의 차(cx=350)는 화면 기준 "오른쪽"으로
+               **잘못** 분류된다 (실제로는 트랙중앙 470 의 왼쪽).
+            -> 왼쪽으로 피한다 = **이미 치우친 쪽으로 더 나간다**
+
+        회피량이 "트랙 반폭의 절반"(= 트랙 반쪽의 중앙)이라는 설계와도
+        맞아야 한다. 그 설계는 "차가 점유한 반쪽의 반대쪽 반으로 간다"는
+        뜻이고, 반쪽을 가르는 선은 화면 중심이 아니라 트랙 중앙이다.
+        ────────────────────────────────────────────────────────────
         """
-        car_on_left = car_cx < image_width / 2.0
+        car_on_left = car_cx < track_center_x
         return 1 if car_on_left else -1         # 차가 왼쪽이면 오른쪽으로
 
     def _offset(self, ratio=1.0):
@@ -177,7 +198,7 @@ class OvertakeBehavior:
         return base * self.shift_scale
 
     def update(self, dt, car_present, car_cx, car_bottom_y,
-               image_width, half_near=0.0):
+               image_width, half_near=0.0, track_center_x=None):
         """회피로 인한 목표 오프셋 보정량(픽셀)을 반환한다. 평소 0.
 
         인자에 라이다 값이 없다 — 의도적이다. 클래스 주석 참고.
@@ -191,7 +212,10 @@ class OvertakeBehavior:
             # 이전에는 bbox 하단 y >= 300px(가까움) 을 함께 요구했는데, 그때는
             # 이미 늦어서 shift_sec(0.8s) 안에 못 벌리고 앞차에 닿았다.
             if car_present:
-                d = self._pick_side(car_cx, image_width)
+                # 트랙중앙을 모르면(차선 미검출) 화면중심으로 폴백한다.
+                ref = (image_width / 2.0 if track_center_x is None
+                       else track_center_x)
+                d = self._pick_side(car_cx, ref)
                 self._dir = d
                 self._amount = self._shift_amount(half_near)
                 self.phase = OvertakePhase.SHIFT
@@ -341,11 +365,20 @@ class LateralPlanner:
         if self.enable_overtake:
             # 카메라 관측만 넘긴다. obs 에는 라이다 값(front_dist 등)도 들어 있지만
             # 회피는 그걸 쓰지 않는다 (OvertakeBehavior 주석 참고).
+            # 트랙중앙의 화면 x = 기준선 + 오프셋. 둘 다 perception 이 준다.
+            # 차선을 못 보고 있으면(lane_valid=False) 오프셋이 옛 값이므로
+            # None 을 넘겨 화면중심 폴백을 쓰게 한다.
+            ref_x = getattr(obs, "ref_x", 0.0)
+            track_center_x = None
+            if getattr(obs, "lane_valid", False) and ref_x > 0.0:
+                track_center_x = ref_x + obs.offset_near
+
             target += self.overtake.update(
                 dt,
                 obs.car_present, obs.car_cx, obs.car_bottom_y,
                 image_width,
                 half_near=half_near,
+                track_center_x=track_center_x,
             )
 
         return target

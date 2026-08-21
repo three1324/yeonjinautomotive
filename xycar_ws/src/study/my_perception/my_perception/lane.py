@@ -53,6 +53,15 @@ class LaneResult:
     half_near: float = 0.0
     half_far: float = 0.0
 
+    # 이 프레임에서 오프셋을 잰 **기준선의 화면 x좌표** = width/2 + center_bias_px.
+    # 곧 "차량 중심선이 영상에서 어디인가"이다.
+    #
+    # 왜 밖으로 내보내나 (2026-08-21): my_driver 가 "방해차량이 트랙 중앙의
+    # 어느 쪽에 있나"를 판단하려면 트랙중앙의 화면 x 가 필요한데, 그건
+    # ref_x + offset_near 로만 구할 수 있다. center_bias_px 를 my_driver 에도
+    # 적어두면 두 값이 반드시 어긋나므로, 기준을 정한 쪽이 실어 보낸다.
+    ref_x: float = 0.0
+
 
 def _fit(instances, y_lo, y_hi, min_pts, min_span):
     """(xs, ys) 인스턴스들을 합쳐 x = f(y) 2차 다항식으로 피팅. 실패 시 None."""
@@ -241,6 +250,7 @@ class LaneEstimator:
                     self._last.offset_near, self._last.offset_far, False, 0.0,
                     half_near=self._half[self.eval_near] or 0.0,
                     half_far=self._half[self.eval_far] or 0.0,
+                    ref_x=self.width / 2.0 + self.center_bias_px,
                 )
             return self._last
 
@@ -259,5 +269,6 @@ class LaneEstimator:
             quality=min(q_near, q_far),
             half_near=self._half[self.eval_near] or 0.0,
             half_far=self._half[self.eval_far] or 0.0,
+            ref_x=target,
         )
         return self._last

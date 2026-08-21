@@ -120,6 +120,9 @@ class Obs:
     # 0.0 이면 인지가 아직 좌우 흰선을 동시에 본 적이 없다는 뜻 -> 고정값 폴백.
     half_near: float = 0.0
     half_far: float = 0.0
+    # 오프셋 기준선의 화면 x (perception 이 실어 보낸다). 0.0 이면 아직
+    # 못 받았다는 뜻이라 회피 좌/우 판단이 화면중심 폴백으로 간다.
+    ref_x: float = 0.0
 
     light: int = 0
 
@@ -347,6 +350,8 @@ class DriverNode(Node):
         if len(msg.data) >= 6:
             self.obs.half_near = msg.data[4]
             self.obs.half_far = msg.data[5]
+        if len(msg.data) >= 7:
+            self.obs.ref_x = msg.data[6]
         self._last_lane_time = self.get_clock().now()
 
 
