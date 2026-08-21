@@ -37,6 +37,14 @@ class DriveFSM:
     start_confirm_frames:
         초록불이 몇 프레임 연속 유지돼야 출발할지. LightVoter 가 이미 투표로
         확정한 값을 주지만, 출발은 되돌릴 수 없는 동작이라 한 겹 더 확인한다.
+
+    카운터는 "연속"이 아니라 **누적/감쇠**다 (2026-08-21 수정).
+        원래는 확정값이 GREEN 이 아닌 프레임 한 번만 껴도 카운트가 0 으로
+        리셋됐다. LightVoter 가 이미 한 번 걸러낸 값인데도, 임계 근처에서
+        확정값 자체가 GREEN/NONE 사이를 흔들리면(인식이 불안정할수록 흔함)
+        이 두 번째 "연속" 조건이 영원히 안 채워져 출발을 못 하는 실차 증상이
+        나왔다. 미스 한 번에 0 이 아니라 1 만 깎으면, 노이즈는 걸러내면서도
+        대체로 맞는 신호에는 계속 다가간다.
     """
 
     def __init__(self, start_confirm_frames=5, enable_shortcut=False,
@@ -111,7 +119,8 @@ class DriveFSM:
                     self.state = State.LANE_DRIVE
                     self._reason = f"green x{self._green_count}"
             else:
-                self._green_count = 0
+                # 리셋이 아니라 1 감쇠 — 위 클래스 docstring 참고.
+                self._green_count = max(0, self._green_count - 1)
 
         elif self.state is State.LANE_DRIVE:
             # 주행 중 빨간불 -> 정지. 좌회전 진입보다 **먼저** 본다.
@@ -128,7 +137,7 @@ class DriveFSM:
                     self._reason = f"red x{self.red_confirm_frames}"
                     return self.state
             else:
-                self._red_count = 0
+                self._red_count = max(0, self._red_count - 1)
 
             # 좌회전(지름길) 진입. 초록불 출발과 같은 방식으로 연속 확정을 요구한다 —
             # 진입하면 트랙 왼쪽 끝으로 붙으므로 오검출 한 번에 들어가면 위험하다.
@@ -139,7 +148,7 @@ class DriveFSM:
                     self._shortcut_t = 0.0
                     self._reason = f"left arrow x{self._left_count}"
             else:
-                self._left_count = 0
+                self._left_count = max(0, self._left_count - 1)
 
         elif self.state is State.STOP_RED:
             # 탈출은 두 가지. 어느 쪽도 신호 한 프레임으로는 안 풀린다.
@@ -151,6 +160,7 @@ class DriveFSM:
                     self._green_count = 0
                     self._reason = f"green x{self.start_confirm_frames}"
             elif light_state == LIGHT_NONE:
+                self._green_count = max(0, self._green_count - 1)
                 # 신호등이 **아예 안 보인다**. LightVoter 는 본체를
                 # miss_tolerance 프레임 연속 놓쳐야 NONE 을 내므로, 이건
                 # "신호등이 시야에 없다"는 뜻이지 단발 결측이 아니다.
@@ -163,7 +173,7 @@ class DriveFSM:
                     self._reason = f"red released (no light {self.red_release_sec:.0f}s)"
             else:
                 # RED/YELLOW/LEFT — 아직 신호등이 보이고 초록이 아니다. 선다.
-                self._green_count = 0
+                self._green_count = max(0, self._green_count - 1)
                 self._none_t = 0.0
 
         elif self.state is State.SHORTCUT:
