@@ -116,6 +116,22 @@ class RubberconeNode(Node):
         self.declare_parameter('zone_enter_frames', 5)
         self.declare_parameter('zone_exit_frames', 5)
 
+        # ---- /cone_cmd 발행 주기 분리 (2026-08-21) ----
+        # 이 노드는 원래 scan_callback 안에서 곧바로 발행했다. 그러면 발행
+        # 주기가 라이다 스캔 주기(ydlidar.yaml 의 frequency: 10.0, ~10Hz)에
+        # 그대로 묶인다. driver_node 는 30Hz 로 돌면서 cone_cmd_timeout_sec
+        # (0.5s)로 "명령이 끊겼는가"를 본다 — 평소엔 10Hz 면 5프레임 여유가
+        # 있어 괜찮지만, USB 시리얼 지연·모터 회전 흔들림으로 스캔 한두 개가
+        # 밀리면 그 여유가 순식간에 사라져 정지/폴백이 걸렸다.
+        # publish_rate_hz 로 **발행만** 분리한다 — 계산은 그대로 스캔 도착 시
+        # (~10Hz)에 하고, 그 사이는 마지막 계산값을 타이머로 다시 쏜다.
+        self.declare_parameter('publish_rate_hz', 30.0)
+        # 스캔 자체가 이만큼 안 오면(진짜로 라이다/시리얼이 죽은 경우) 마지막
+        # 값을 계속 재발행하지 않는다 — 그러면 driver_node 가 "명령이 온다"고
+        # 착각해 죽은 라이다 기준 옛 값으로 계속 달린다. 대신 정지값(0,0)을
+        # 발행한다. driver_node 의 cone_cmd_timeout_sec 과 같은 값으로 맞춘다.
+        self.declare_parameter('scan_stale_timeout_sec', 0.5)
+
         p = self.get_parameter
         self.scan_topic = p('scan_topic').value
         self.drive_topic = p('drive_topic').value
@@ -161,12 +177,22 @@ class RubberconeNode(Node):
         self.zone_enter_frames = p('zone_enter_frames').value
         self.zone_exit_frames = p('zone_exit_frames').value
 
+        self.publish_rate_hz = p('publish_rate_hz').value
+        self.scan_stale_timeout_sec = p('scan_stale_timeout_sec').value
+
         self.bridge = CvBridge()
         self.smoothed_y = None
         self.last_time = self.get_clock().now()
         self.zone_active = False
         self.dense_count = 0
         self.sparse_count = 0
+
+        # 마지막으로 **계산된** 명령과, 그 계산의 근거가 된 스캔이 도착한 시각.
+        # scan_callback 은 이 값만 갱신하고, 실제 /cone_cmd 발행은 아래
+        # publish_timer 가 전담한다 (발행 주기 분리 — 위 파라미터 주석 참고).
+        self._last_angle = 0.0
+        self._last_speed = 0.0
+        self._last_scan_time = None
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, qos)
@@ -175,8 +201,12 @@ class RubberconeNode(Node):
         self.debug_pub = self.create_publisher(Image, self.debug_topic, 10)
         self.zone_pub = self.create_publisher(Bool, self.zone_topic, 10)
 
+        self.publish_timer = self.create_timer(
+            1.0 / self.publish_rate_hz, self._publish_timer_cb)
+
         self.get_logger().info(
-            'rubbercone_node started. scan: ' + self.scan_topic + ' -> drive: ' + self.drive_topic)
+            'rubbercone_node started. scan: ' + self.scan_topic + ' -> drive: ' + self.drive_topic +
+            f' (publish {self.publish_rate_hz:.0f}Hz)')
 
     # ==================== 라이다 -> 차량 로컬 좌표 (전방=+x, 좌측=+y) ====================
     def _scan_to_points(self, msg: LaserScan):
@@ -394,12 +424,43 @@ class RubberconeNode(Node):
         speed = speed * speed_factor
         speed = max(speed, self.min_absolute_speed)  # 모터가 멈추지 않는 최소 속도 보장
 
-        motor_msg = Float32MultiArray()
-        motor_msg.data = [angle, float(speed)]
-        self.drive_pub.publish(motor_msg)
+        # 발행은 여기서 하지 않는다 — publish_timer 가 전담한다(발행 주기
+        # 분리, 클래스 상단 주석 참고). 여기서는 최신 계산값과 "언제 계산했나"
+        # 만 남긴다.
+        self._last_angle = angle
+        self._last_speed = float(speed)
+        self._last_scan_time = self.get_clock().now()
 
         self._update_zone(all_points)
         self._publish_debug(roi_points, left, right, tx, ty, angle, source)
+
+    # ==================== 발행 타이머 (스캔 주기와 분리) ====================
+    def _publish_timer_cb(self):
+        """/cone_cmd 를 publish_rate_hz(기본 30) 로 발행한다.
+
+        스캔이 최근에 왔으면 그 계산값을 그대로 다시 쏜다(스캔 사이 간격을
+        메운다). 스캔 자체가 scan_stale_timeout_sec 넘게 안 왔으면 — 진짜로
+        라이다/시리얼이 죽은 것이다 — 죽은 라이다 기준의 옛 값을 계속
+        내보내지 않고 정지값(0,0)을 낸다. 그래야 driver_node 가 "명령이
+        온다"고 착각해 죽은 라이다로 계속 달리는 일이 없다.
+        """
+        now = self.get_clock().now()
+        stale = (
+            self._last_scan_time is None
+            or (now - self._last_scan_time).nanoseconds / 1e9 > self.scan_stale_timeout_sec
+        )
+        if stale:
+            angle, speed = 0.0, 0.0
+            if self._last_scan_time is not None:
+                self.get_logger().error(
+                    '/scan 이 끊겼다 — cone_cmd 를 정지값으로 발행 '
+                    '(라이다/시리얼 점검)', throttle_duration_sec=1.0)
+        else:
+            angle, speed = self._last_angle, self._last_speed
+
+        motor_msg = Float32MultiArray()
+        motor_msg.data = [float(angle), float(speed)]
+        self.drive_pub.publish(motor_msg)
 
     # ==================== 디버그 시각화 ====================
     def _publish_debug(self, roi_points, left, right, tx, ty, angle, source):
