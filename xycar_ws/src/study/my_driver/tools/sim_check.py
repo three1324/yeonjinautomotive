@@ -73,8 +73,8 @@ def make_controllers(a):
         cone_n_lo=2.0, cone_n_hi=8.0, cone_factor_min=0.6,
     )
     lateral = LateralPlanner(
-        OvertakeBehavior(shift_px=120.0, trigger_bottom_y=300.0,
-                         shift_sec=0.8, pass_sec=1.5, return_sec=1.0),
+        OvertakeBehavior(shift_px=120.0,
+                         shift_sec=0.8, pass_sec=0.0, return_sec=1.0),
         enable_overtake=True,
     )
     speed = SpeedLimiter(accel_per_sec=20.0, decel_per_sec=60.0,

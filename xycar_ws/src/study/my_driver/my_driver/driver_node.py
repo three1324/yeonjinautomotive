@@ -158,10 +158,14 @@ class DriverNode(Node):
                 ("lane_lost_stop_sec", 2.0),
                 ("log_period_sec", 1.0),
                 # FSM
-                ("fsm.start_confirm_frames", 5),
+                ("fsm.start_confirm_frames", 3),
                 ("fsm.enable_shortcut", False),
                 ("fsm.shortcut_sec", 12.0),
-                ("fsm.shortcut_confirm_frames", 5),
+                ("fsm.shortcut_confirm_frames", 3),
+                ("fsm.enable_red_stop", True),
+                ("fsm.red_confirm_frames", 3),
+                ("fsm.none_tolerance", 1),
+                ("fsm.red_release_sec", 3.0),
                 ("lateral.shortcut_half_car_px", 45.0),
                 ("fsm.auto_start", False),
                 # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
@@ -179,13 +183,10 @@ class DriverNode(Node):
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.shift_px", 120.0),
-                ("lateral.trigger_bottom_y", 300.0),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
                 ("lateral.cooldown_sec", 1.0),
-                ("lateral.pass_exit_ratio", 0.85),
-                ("lateral.pass_exit_cx_ratio", 0.85),
                 ("lateral.lost_hold_sec", 1.0),
                 # 종방향
                 ("speed.base", 12.0),
@@ -226,6 +227,10 @@ class DriverNode(Node):
             enable_shortcut=g("fsm.enable_shortcut").value,
             shortcut_sec=g("fsm.shortcut_sec").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
+            enable_red_stop=g("fsm.enable_red_stop").value,
+            red_confirm_frames=g("fsm.red_confirm_frames").value,
+            none_tolerance=g("fsm.none_tolerance").value,
+            red_release_sec=g("fsm.red_release_sec").value,
             auto_start=g("fsm.auto_start").value,
         )
         self.cone_zone = ConeZoneDetector(
@@ -238,13 +243,10 @@ class DriverNode(Node):
         self.lateral = LateralPlanner(
             OvertakeBehavior(
                 shift_px=g("lateral.shift_px").value,
-                trigger_bottom_y=g("lateral.trigger_bottom_y").value,
                 shift_sec=g("lateral.shift_sec").value,
                 pass_sec=g("lateral.pass_sec").value,
                 return_sec=g("lateral.return_sec").value,
                 cooldown_sec=g("lateral.cooldown_sec").value,
-                pass_exit_ratio=g("lateral.pass_exit_ratio").value,
-                pass_exit_cx_ratio=g("lateral.pass_exit_cx_ratio").value,
                 lost_hold_sec=g("lateral.lost_hold_sec").value,
             ),
             enable_overtake=g("lateral.enable_overtake").value,
@@ -425,9 +427,16 @@ class DriverNode(Node):
         state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
 
         if not self.fsm.should_drive:
-            self._publish(0.0, 0.0)
-            self._log(state, 0.0, 0.0, "wait")
-            self._pub_debug(state.value, 0.0, 0.0, "wait")
+            # _publish(0,0) 이 아니라 _halt() 다. _publish 는 모터에 0 만 쏘고
+            # SpeedLimiter 내부 _cmd 는 직전 값(예: 12)으로 남는다. 출발선
+            # WAIT_LIGHT 는 처음부터 0 이라 문제가 없었지만, **주행 중 정지
+            # (STOP_RED)** 가 생기면 재출발 순간 리미터가 "이미 12로 달리는
+            # 중"이라 믿고 가속제한을 통째로 건너뛴다 — 8/19 에 고쳤던
+            # fault 2(저전압)를 다시 부르는 길이다.
+            self._halt()
+            reason = "red" if state is State.STOP_RED else "wait"
+            self._log(state, 0.0, 0.0, reason)
+            self._pub_debug(state.value, 0.0, 0.0, reason)
             return
 
         # ── 구간 판정은 카메라, 주행은 rubbercone_node (2026-08-19 2차 실차) ──

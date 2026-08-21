@@ -1,4 +1,52 @@
 #!/usr/bin/env python3
+# rubbercone_node.py (xycar_planning package)
+#
+# 시뮬레이션에서 검증된 두 접근(콘 페어링 + Pure Pursuit, Follow-the-Gap 폴백)을
+# 오늘 실제 하드웨어 테스트로 검증한 안전장치(모양 필터, 최소 간격 검사, 목표점
+# 급변 제한)와 합친 버전. S자 커브 대응력 향상이 핵심 목표.
+#
+# 변경 핵심:
+#   1. 고정/자동 거리구간(bin) 스캔 방식 -> "가장 가까운 왼쪽 콘 + 그와 전후방
+#      거리(x)가 가장 비슷한 오른쪽 콘"을 짝짓는 방식으로 교체. S자 커브에서
+#      같은 열 콘끼리 잘못 짝지어지는 문제를 구조적으로 줄임.
+#   2. 단순 PD 대신 휠베이스 기반 Pure Pursuit 조향식 사용.
+#   3. 콘을 하나도 못 찾으면 Follow-the-Gap으로 안전하게 폴백.
+#   4. 부채꼴(각도+거리) 기반 구간 진입/이탈 감지, 연속 프레임 카운팅으로
+#      노이즈에 의한 오탐 방지. '/rubbercone/zone_active'로 발행 (나중에
+#      mission_node가 참고할 수 있음).
+#
+# 실측 검증된 것 (오늘 하드웨어 테스트로 확인):
+#   - 라이다 실제 드라이버: xycar_lidar_node (YDLIDAR, /dev/ttyUSB1, 230400bps)
+#   - 모터 토픽: 'xycar_motor', Float32MultiArray, data=[angle, speed]
+#
+# 아직 실측 필요:
+#   - wheelbase_m: 기본값은 추정치. 실제 차량 앞뒤 축간거리를 자로 재서 넣을 것.
+#   - steer_gain, angle_offset_deg: 시뮬레이션 값 그대로 가져온 것. 실차에서
+#     angle_offset_deg부터 먼저 보정(정면에 물체 하나 놓고 y=0 확인)한 뒤,
+#     steer_gain은 실제 조향 반응 보고 튜닝할 것.
+#
+# IMPORTANT: lane_control_node와 동시에 켜지 마세요. 둘 다 'xycar_motor'에
+# 발행해서 충돌합니다.
+#
+# ── 우리 저장소에서 바뀐 점 (2026-08-21) ──────────────────────────────
+#   1. drive_topic 기본값 : xycar_motor -> cone_cmd
+#      zone_topic  기본값 : /rubbercone/zone_active -> /cone_zone_active
+#      우리 시스템에서 모터에 쏘는 노드는 driver_node 하나뿐이고, 이 노드의
+#      출력은 driver_node 가 콘 구간에서만 통과시킨다(mux). 기본값이 모터
+#      토픽이면 params 누락 한 번에 두 노드가 동시에 모터를 잡는다 —
+#      실제로 그 사고가 있었다(launch 의 params_file 누수).
+#
+#   2. /cone_cmd 발행을 **스캔 주기에서 분리해 30Hz 고정**으로 바꿨다.
+#      원본은 scan_callback 안에서 바로 발행했는데, YDLIDAR 스캔이
+#      10Hz 안팎이고 간헐적으로 더 늦어진다. driver_node 는 명령이
+#      cone_cmd_timeout 넘게 안 오면 콘 구간에서 정지시키므로, 스캔이
+#      한 번 늦을 때마다 차가 끊겨 섰다. 계산은 스캔이 올 때 하고,
+#      발행만 타이머로 뗀다.
+#      단, 스캔 자체가 죽으면 옛 값을 계속 쏘면 안 된다 —
+#      scan_stale_timeout_sec 넘으면 정지값(0,0)을 낸다.
+#
+#   알고리즘(클러스터링/페어링/Pure Pursuit/FTG/속도)은 팀원 검증본 그대로다.
+# ────────────────────────────────────────────────────────────────────
 
 import math
 import numpy as np
@@ -17,12 +65,7 @@ class RubberconeNode(Node):
 
         # ---- 공통 ----
         self.declare_parameter('scan_topic', 'scan')
-        # ★ 기본값은 절대 'xycar_motor' 로 두지 않는다 (2026-08-21).
-        #   원본 기본값이 모터 토픽이었다. params 파일이 한 번이라도 안 실리면
-        #   이 노드가 driver_node 와 같이 모터에 쏘게 되고, 콘 구간이 아닌
-        #   곳에서도 차가 라이다 명령대로 움직인다. 실제로 launch 의
-        #   params_file 누수(drive.launch.py 참고)로 그 일이 벌어졌다.
-        #   우리 시스템에서 모터에 쏘는 노드는 driver_node 하나뿐이다.
+        # ★ 기본값을 절대 'xycar_motor' 로 두지 않는다 — 헤더 주석 참고.
         self.declare_parameter('drive_topic', 'cone_cmd')
         self.declare_parameter('debug_topic', '/rubbercone/debug_image')
         self.declare_parameter('zone_topic', '/cone_zone_active')
@@ -58,8 +101,9 @@ class RubberconeNode(Node):
         self.declare_parameter('max_target_step_m', 0.12)
 
         # ---- 속도 ----
-        self.declare_parameter('base_speed', 6.0)
+        self.declare_parameter('base_speed', 8.0)  # 실측 확인: 8 이상에서 급커브 멈춤 없이 안정적 (min_absolute_speed=5와 조합)
         self.declare_parameter('min_speed_ratio', 0.4)  # 급조향 시 base_speed 대비 최소 남기는 비율
+        self.declare_parameter('min_absolute_speed', 5.0)  # 위 비율 계산과 무관하게 이 값 밑으로는 안 내려감 (모터 저속 한계 이상으로 유지)
         self.declare_parameter('lost_speed_ratio', 0.7)  # 콘을 못 찾아 FTG 폴백할 때 감속 비율
 
         # ---- Follow-the-Gap 폴백 ----
@@ -73,6 +117,10 @@ class RubberconeNode(Node):
         self.declare_parameter('zone_point_threshold', 20)
         self.declare_parameter('zone_enter_frames', 5)
         self.declare_parameter('zone_exit_frames', 5)
+
+        # ---- 발행 주기 (스캔 주기와 분리) ----
+        self.declare_parameter('publish_rate_hz', 30.0)
+        self.declare_parameter('scan_stale_timeout_sec', 0.5)
 
         p = self.get_parameter
         self.scan_topic = p('scan_topic').value
@@ -106,6 +154,7 @@ class RubberconeNode(Node):
 
         self.base_speed = p('base_speed').value
         self.min_speed_ratio = p('min_speed_ratio').value
+        self.min_absolute_speed = p('min_absolute_speed').value
         self.lost_speed_ratio = p('lost_speed_ratio').value
 
         self.car_width = p('car_width_m').value
@@ -117,6 +166,8 @@ class RubberconeNode(Node):
         self.zone_point_threshold = p('zone_point_threshold').value
         self.zone_enter_frames = p('zone_enter_frames').value
         self.zone_exit_frames = p('zone_exit_frames').value
+        self.publish_rate_hz = p('publish_rate_hz').value
+        self.scan_stale_timeout_sec = p('scan_stale_timeout_sec').value
 
         self.bridge = CvBridge()
         self.smoothed_y = None
@@ -125,6 +176,11 @@ class RubberconeNode(Node):
         self.dense_count = 0
         self.sparse_count = 0
 
+        # 스캔이 계산해 둔 최신 명령. 타이머가 이걸 30Hz 로 다시 쏜다.
+        self._last_angle = 0.0
+        self._last_speed = 0.0
+        self._last_scan_time = None
+
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, qos)
 
@@ -132,11 +188,17 @@ class RubberconeNode(Node):
         self.debug_pub = self.create_publisher(Image, self.debug_topic, 10)
         self.zone_pub = self.create_publisher(Bool, self.zone_topic, 10)
 
+        self.publish_timer = self.create_timer(
+            1.0 / self.publish_rate_hz, self._publish_timer_cb)
+
         self.get_logger().info(
-            'rubbercone_node started. scan: ' + self.scan_topic + ' -> drive: ' + self.drive_topic)
+            'rubbercone_node started. scan: ' + self.scan_topic +
+            ' -> drive: ' + self.drive_topic +
+            f' (publish {self.publish_rate_hz:.0f}Hz)')
 
     # ==================== 라이다 -> 차량 로컬 좌표 (전방=+x, 좌측=+y) ====================
     def _scan_to_points(self, msg: LaserScan):
+        """ROI 없이 전체 유효 포인트를 반환 (구간 감지용으로도 재사용)."""
         points = []
         angle = msg.angle_min
         for r in msg.ranges:
@@ -186,6 +248,10 @@ class RubberconeNode(Node):
         return self._merge_nearby_cones(cones)
 
     def _merge_nearby_cones(self, cones):
+        """라바콘 표면 반사가 고르지 않아 하나의 콘이 두 개 이상의 클러스터로
+        쪼개지는 경우가 있음. 모양 필터를 통과한 작은 클러스터 중심점끼리
+        cone_merge_dist_m 이내로 가까우면 같은 콘으로 보고 평균 위치로 합침
+        (single-linkage 방식, 더 이상 합쳐질 게 없을 때까지 반복)."""
         merged = list(cones)
         changed = True
         while changed and len(merged) > 1:
@@ -344,13 +410,45 @@ class RubberconeNode(Node):
         steer_ratio = abs(angle) / self.angle_limit if self.angle_limit > 0 else 0.0
         speed_factor = max(self.min_speed_ratio, 1.0 - steer_ratio)
         speed = speed * speed_factor
+        speed = max(speed, self.min_absolute_speed)  # 모터가 멈추지 않는 최소 속도 보장
 
-        motor_msg = Float32MultiArray()
-        motor_msg.data = [angle, float(speed)]
-        self.drive_pub.publish(motor_msg)
+        # 여기서 바로 발행하지 않는다 — 계산 결과만 남기고, 발행은
+        # _publish_timer_cb 가 30Hz 로 한다 (헤더 주석 2번 참고).
+        self._last_angle = angle
+        self._last_speed = float(speed)
+        self._last_scan_time = self.get_clock().now()
 
         self._update_zone(all_points)
         self._publish_debug(roi_points, left, right, tx, ty, angle, source)
+
+    # ==================== 30Hz 고정 발행 ====================
+    def _publish_timer_cb(self):
+        """/cone_cmd 를 publish_rate_hz(기본 30) 로 발행한다.
+
+        스캔이 최근에 왔으면 그 계산값을 그대로 다시 쏜다 — 스캔 사이의
+        빈 간격을 메우는 것이 목적이다. 스캔 자체가 scan_stale_timeout_sec
+        넘게 안 왔으면 라이다/시리얼이 죽은 것이므로, 죽은 라이다 기준의
+        옛 값을 계속 내보내지 않고 정지값(0,0)을 낸다. 그래야 driver_node 가
+        '명령이 계속 온다'고 착각해 죽은 라이다로 콘 사이를 달리지 않는다.
+        """
+        now = self.get_clock().now()
+        stale = (
+            self._last_scan_time is None
+            or (now - self._last_scan_time).nanoseconds / 1e9
+            > self.scan_stale_timeout_sec
+        )
+        if stale:
+            angle, speed = 0.0, 0.0
+            if self._last_scan_time is not None:
+                self.get_logger().error(
+                    '/scan 이 끊겼다 — cone_cmd 를 정지값으로 발행 '
+                    '(라이다/시리얼 점검)', throttle_duration_sec=1.0)
+        else:
+            angle, speed = self._last_angle, self._last_speed
+
+        motor_msg = Float32MultiArray()
+        motor_msg.data = [float(angle), float(speed)]
+        self.drive_pub.publish(motor_msg)
 
     # ==================== 디버그 시각화 ====================
     def _publish_debug(self, roi_points, left, right, tx, ty, angle, source):
