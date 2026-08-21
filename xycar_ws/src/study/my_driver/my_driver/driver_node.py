@@ -162,12 +162,16 @@ class DriverNode(Node):
                 ("fsm.enable_shortcut", False),
                 ("fsm.shortcut_sec", 12.0),
                 ("fsm.shortcut_confirm_frames", 5),
+                ("fsm.enable_red_stop", True),
+                ("fsm.red_confirm_frames", 5),
+                ("fsm.red_release_sec", 3.0),
                 ("lateral.shortcut_half_car_px", 45.0),
                 ("lateral.shortcut_margin_px", 20.0),
                 ("fsm.auto_start", False),
                 # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
                 # 판정을 라이다에 맡겼더니 콘이 없는 곳(벽·기둥)에서도 구간으로
                 # 잡혀 제어권이 넘어갔다 (2026-08-19 2차 실차). cone_zone.py 참고.
+                ("cone.speed_floor", 4.5),
                 ("cone_zone.enter_n", 8),      # 콘 이 개수 이상 보이면 진입 후보
                 ("cone_zone.enter_min_size_px", 0.0),
                 # ↑ 그 콘이 **충분히 가까워야** 진입한다 (가장 큰 콘 bbox 높이).
@@ -180,13 +184,10 @@ class DriverNode(Node):
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.shift_px", 120.0),
-                ("lateral.trigger_bottom_y", 300.0),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
                 ("lateral.cooldown_sec", 1.0),
-                ("lateral.pass_exit_ratio", 0.85),
-                ("lateral.pass_exit_cx_ratio", 0.85),
                 ("lateral.lost_hold_sec", 1.0),
                 # 종방향
                 ("speed.base", 12.0),
@@ -228,6 +229,9 @@ class DriverNode(Node):
             enable_shortcut=g("fsm.enable_shortcut").value,
             shortcut_sec=g("fsm.shortcut_sec").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
+            enable_red_stop=g("fsm.enable_red_stop").value,
+            red_confirm_frames=g("fsm.red_confirm_frames").value,
+            red_release_sec=g("fsm.red_release_sec").value,
             auto_start=g("fsm.auto_start").value,
         )
         self.cone_zone = ConeZoneDetector(
@@ -240,21 +244,19 @@ class DriverNode(Node):
         self.lateral = LateralPlanner(
             OvertakeBehavior(
                 shift_px=g("lateral.shift_px").value,
-                trigger_bottom_y=g("lateral.trigger_bottom_y").value,
                 shift_sec=g("lateral.shift_sec").value,
                 pass_sec=g("lateral.pass_sec").value,
                 return_sec=g("lateral.return_sec").value,
                 cooldown_sec=g("lateral.cooldown_sec").value,
-                pass_exit_ratio=g("lateral.pass_exit_ratio").value,
-                pass_exit_cx_ratio=g("lateral.pass_exit_cx_ratio").value,
                 lost_hold_sec=g("lateral.lost_hold_sec").value,
             ),
             enable_overtake=g("lateral.enable_overtake").value,
             shortcut_half_car_px=g("lateral.shortcut_half_car_px").value,
             shortcut_margin_px=g("lateral.shortcut_margin_px").value,
         )
-        # 콘 구간 속도 하한에도 쓴다 (_drive_cone_zone 참고).
+        # 콘 구간 속도 하한은 별도 파라미터다 (_drive_cone_zone 참고).
         self.speed_min = g("speed.min").value
+        self.cone_speed_floor = g("cone.speed_floor").value
         self.longitudinal = LongitudinalPlanner(
             base_speed=g("speed.base").value,
             min_speed=g("speed.min").value,
@@ -431,9 +433,18 @@ class DriverNode(Node):
         state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
 
         if not self.fsm.should_drive:
-            self._publish(0.0, 0.0)
-            self._log(state, 0.0, 0.0, "wait")
-            self._pub_debug(state.value, 0.0, 0.0, "wait")
+            # _publish(0,0) 이 아니라 _halt() 다. 둘의 차이가 중요하다.
+            # _publish 는 모터에 0 을 쏘기만 하고 SpeedLimiter 내부 _cmd 는
+            # 직전 값(예: 12)으로 남는다. 출발선 WAIT_LIGHT 는 처음부터 0 이라
+            # 아무도 몰랐지만, **주행 중 빨간불 정지(STOP_RED)** 가 생기면서
+            # 문제가 된다 — 재출발하는 순간 리미터가 "이미 12로 달리는 중"이라
+            # 믿고 12를 그대로 내보내 가속제한이 통째로 건너뛰어진다.
+            # 그건 우리가 8/19 에 고쳤던 fault 2(저전압) 를 다시 부르는 길이다.
+            # _halt() 는 조향·리미터를 함께 0 으로 동기화한다.
+            self._halt()
+            reason = "red" if state is State.STOP_RED else "wait"
+            self._log(state, 0.0, 0.0, reason)
+            self._pub_debug(state.value, 0.0, 0.0, reason)
             return
 
         # ── 구간 판정은 카메라, 주행은 rubbercone_node (2026-08-19 2차 실차) ──
@@ -570,8 +581,15 @@ class DriverNode(Node):
         # SpeedLimiter 는 가감속·상한만 걸고 **하한이 없다.**
         #
         # 0 은 그대로 둔다 — 그건 "서라"는 뜻이라 눌러 올리면 안 된다.
+        #
+        # [2026-08-21 갱신] 팀원이 같은 문제를 rubbercone_node 안에서 고쳐 왔다
+        # (min_absolute_speed=5.0, base_speed=8.0 — 실차 검증본). 그래서 여기는
+        # **안전망으로만** 남긴다. 하한을 speed.min(7.0) 으로 두면 팀원이 실제로
+        # 달려보고 정한 5.0 을 우리가 덮어써서 검증된 동작이 바뀐다.
+        # cone.speed_floor 는 정류 한계(1500 ERPM = speed 4.06) 바로 위로만 잡아,
+        # rubbercone 이 파라미터 없이 뜨는 경우에만 걸리게 한다.
         if cone_speed > 0.0:
-            cone_speed = max(cone_speed, self.speed_min)
+            cone_speed = max(cone_speed, self.cone_speed_floor)
 
         speed = self.speed_limiter.update(dt, cone_speed)
 

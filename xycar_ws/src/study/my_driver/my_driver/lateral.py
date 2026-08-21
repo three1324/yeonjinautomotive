@@ -42,10 +42,18 @@ class OvertakePhase(Enum):
 class OvertakeBehavior:
     """방해차량 회피 서브행동. **카메라만 쓴다 (라이다 사용 안 함).**
 
-    트리거 조건 (모두 만족해야 시작):
-      - 카메라가 차량을 봤다 (라바콘이 아니라 차량이라는 건 YOLO만 안다)
-      - 그 차량이 충분히 가깝다 (bbox 하단 y가 임계 이상)
-      - 쿨다운 중이 아니다
+    규칙이 **두 줄**이다 (2026-08-21 사용자 결정으로 단순화):
+      시작 : 카메라가 차량을 봤다. 그게 전부다 (+ 쿨다운 중이 아닐 것)
+      복귀 : 차량이 안 보이는 상태가 lost_hold_sec(1초) 이어졌다
+
+    이전에는 시작에 거리 조건(bbox 하단 y >= 300px)이, 복귀에 세 가지
+    관측 조건(멀어짐 / 화면 가장자리 / 시간 상한)이 더 있었다. 실차에서
+    거리 조건은 **너무 늦게** 걸렸고(그 시점엔 이미 shift_sec 안에 못 벌린다),
+    복귀 조건들은 **너무 일찍** 걸렸다(관측이 흔들릴 때마다 차 옆을 지나는
+    중에 중앙으로 돌아왔다). 둘 다 같은 신호(차가 보이는가) 하나로 줄였다.
+
+    대가: 트리거의 유일한 문턱이 YOLO 의 car_conf 가 됐다. 차량 오검출이
+    그대로 헛회피가 된다 — 오발동이 잦으면 car_conf 를 올려야 한다.
 
     ────────────────────────────────────────────────────────────────
     왜 라이다를 뺐나 (2026-08-19 실차 결정)
@@ -74,26 +82,18 @@ class OvertakeBehavior:
     목표가 따라 흔들리면 조향이 진동하기 때문이다.
     """
 
-    def __init__(self, shift_px, trigger_bottom_y,
+    def __init__(self, shift_px,
                  shift_sec, pass_sec, return_sec,
-                 cooldown_sec=1.0, pass_exit_ratio=0.85,
-                 pass_exit_cx_ratio=0.85, lost_hold_sec=1.0):
+                 cooldown_sec=1.0, lost_hold_sec=1.0):
         self.shift_px = shift_px                    # 반폭 미학습 시 폴백값 (픽셀)
-        self.trigger_bottom_y = trigger_bottom_y    # 차량 bbox 하단 y 임계 (클수록 가까움)
         self.shift_sec = shift_sec
-        self.pass_sec = pass_sec                    # PASS 유지의 **상한** (안전장치)
         self.return_sec = return_sec
         self.cooldown_sec = cooldown_sec            # 복귀 후 재발동 금지 시간
-        # PASS 탈출용 히스테리시스. bottom_y 가 trigger 의 이 배율 아래로 내려가면
-        # "지나쳤다"고 본다. 1.0 으로 두면 임계 근처에서 진입/이탈이 떨린다.
-        self.pass_exit_ratio = pass_exit_ratio
-        # 차량이 화면 가장자리로 밀려나면 옆으로 지나친 것이다.
-        # |cx - 중심| / (폭/2) 가 이 값을 넘으면 통과로 본다.
-        # [실측 2026-08-19] 테스트영상 f2741~2811 구간에서 cx 가 440->612 로
-        # 이동하는 동안 bottom_y 는 계속 커져(302->439) "멀어짐" 조건이 걸리지
-        # 않았고, pass_sec 상한(1.5s)으로만 복귀했다. 옆을 스쳐 지나가는 차는
-        # 가까워지면서 화면 밖으로 나가므로 bottom_y 만으로는 못 잡는다.
-        self.pass_exit_cx_ratio = pass_exit_cx_ratio
+        # PASS 유지의 상한. **0 이면 상한 없음**(사용자 결정 2026-08-21).
+        # 0 으로 두면 차가 계속 보이는 한 계속 벌린 채로 달린다 — 앞차를 따라
+        # 가는 상황에서는 그게 맞다. 다만 주차된 차나 트랙 밖 차가 시야에
+        # 계속 걸리면 한쪽으로 붙은 채 트랙을 도는 위험이 남는다.
+        self.pass_sec = pass_sec
         # 차량이 **안 보이는 상태가 이만큼 이어져야** 복귀한다 (2026-08-21).
         # 한 프레임만 놓쳐도 복귀하면, 옆으로 벌린 순간 방해차량이 화면 밖으로
         # 잠깐 나가거나 YOLO 가 한 프레임 놓치는 것만으로 기동이 중단된다.
@@ -184,7 +184,12 @@ class OvertakeBehavior:
                 self._cooldown = max(0.0, self._cooldown - dt)
                 return 0.0
 
-            if car_present and car_bottom_y >= self.trigger_bottom_y:
+            # **보이면 바로 시작한다** (사용자 결정 2026-08-21).
+            # 이전에는 bbox 하단 y >= 300px(가까움) 을 함께 요구했는데, 그때는
+            # 이미 늦어서 shift_sec(0.8s) 안에 못 벌리고 앞차에 닿았다.
+            # 이제 거리 조건이 없으므로 트리거는 YOLO 의 car_conf 게이트가
+            # 유일한 문턱이다 — 오검출이 곧 헛회피가 된다.
+            if car_present:
                 d = self._pick_side(car_cx, image_width)
                 self._dir = d
                 self._amount = self._shift_amount(half_near)
@@ -216,21 +221,21 @@ class OvertakeBehavior:
             else:
                 self._lost_t += dt
 
+            # 복귀 조건은 **"차가 안 보이고 1초"** 하나뿐이다
+            # (사용자 결정 2026-08-21). 이전에 있던 "멀어짐(bottom_y 감소)",
+            # "화면 가장자리로 밀려남(cx)" 은 지웠다 — 관측이 흔들릴 때마다
+            # 회피가 중간에 끊겨 차 옆을 지나는 중에 중앙으로 돌아왔다.
+            # 트리거(보이면 시작)와 복귀(안 보이면 종료)가 같은 신호의 앞뒤라
+            # 규칙이 하나로 단순해진다.
             reason = None
-            if not car_present and self._lost_t >= self.lost_hold_sec:
-                reason = f"car gone({self._lost_t:.1f}s)"
-            elif not car_present:
-                # 아직 유지시간 중 — 벌린 상태를 그대로 유지한다.
-                return self._offset()
-            elif car_bottom_y < self.trigger_bottom_y * self.pass_exit_ratio:
-                reason = f"car receding(y{car_bottom_y:.0f})"
-            elif (image_width > 0
-                  and abs(car_cx - image_width / 2.0) / (image_width / 2.0)
-                  > self.pass_exit_cx_ratio):
-                reason = f"car at edge(cx{car_cx:.0f})"
-            elif self._t >= self.pass_sec:
-                # 위 셋 다 아닌데 시간이 다 됐다 = 관측이 계속 "앞에 있다"고 말하는
-                # 상황이다. 무한정 벌린 채로 달릴 수는 없으니 상한으로 끊는다.
+            if not car_present:
+                if self._lost_t >= self.lost_hold_sec:
+                    reason = f"car gone({self._lost_t:.1f}s)"
+                else:
+                    # 아직 유지시간 중 — 벌린 상태를 그대로 유지한다.
+                    return self._offset()
+            elif self.pass_sec > 0.0 and self._t >= self.pass_sec:
+                # 상한을 켜 뒀을 때만. 기본은 0(상한 없음) — 생성자 주석 참고.
                 reason = f"pass timeout({self.pass_sec:.1f}s)"
 
             if reason is not None:

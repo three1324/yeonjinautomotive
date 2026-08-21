@@ -272,7 +272,16 @@ class PerceptionNode(Node):
             fps = self._frames / elapsed
             self.get_logger().info(
                 f"{fps:4.1f}fps  offset={lane.offset_near:+6.1f} q={lane.quality:.2f} "
-                f"{'OK' if lane.valid else 'HOLD'}  light={STATE_TO_NAME[state]}  "
+                f"{'OK' if lane.valid else 'HOLD'}  light={STATE_TO_NAME[state]}"
+                # 신호등 진단 (2026-08-21). 확정값만 찍으면 "주행 중 인식이
+                # 안 된다"의 원인을 못 가른다. 갈라야 하는 두 경우:
+                #   w=0            -> 신호등 **본체**를 못 봤다 (모션블러/화각
+                #                     이탈/거리). YOLO·카메라 쪽 문제다.
+                #   w>0 lamp=-     -> 본체는 봤는데 **램프**를 못 읽었다.
+                #                     투표 파라미터(min_weight/window) 문제다.
+                # 둘의 처방이 정반대라 이 한 줄이 있어야 고칠 수 있다.
+                f"(w={det.light_width:.0f} "
+                f"lamp={det.lamp or '-'}/{det.lamp_conf:.2f})  "
                 f"cone={det.cone_n} car={int(det.car_present)}"
             )
             self._frames = 0
