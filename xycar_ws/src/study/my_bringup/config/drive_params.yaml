@@ -247,7 +247,7 @@ driver_node:
 
     # --- 상태기계 ---
     fsm:
-      start_confirm_frames: 5   # [튜닝] 초록불이 몇 프레임 연속이어야 출발할지
+      start_confirm_frames: 3   # [튜닝 2026-08-21] 5 -> 3. 실차에서 출발 지연 줄이려고 완화.
       # --- 좌회전(지름길) 미션 ---
       # 좌회전 화살표를 보면 **가장 좌측 흰 실선을 따라 12초** 달리고 복귀한다.
       enable_shortcut: false
