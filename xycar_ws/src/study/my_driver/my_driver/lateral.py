@@ -37,6 +37,7 @@ class OvertakePhase(Enum):
     SHIFT = "SHIFT"     # 옆으로 벌리는 중
     PASS = "PASS"       # 벌린 상태로 통과 중
     RETURN = "RETURN"   # 트랙 중앙으로 복귀 중
+    OVERSHOOT = "OVERSHOOT"  # 중앙을 지나 반대쪽으로 잠시 더
 
 
 class OvertakeBehavior:
@@ -84,8 +85,13 @@ class OvertakeBehavior:
 
     def __init__(self, shift_px,
                  shift_sec, pass_sec, return_sec,
-                 cooldown_sec=1.0, lost_hold_sec=2.0, shift_scale=0.5):
+                 cooldown_sec=1.0, lost_hold_sec=2.0, shift_scale=0.5, overshoot_sec=0.5,
+                 overshoot_scale=1.0):
         self.shift_px = shift_px                    # 반폭 미학습 시 폴백값 (픽셀)
+        # 추월 후 중앙을 지나 반대쪽으로 더 머물 시간과 그 크기 배율.
+        # 0 으로 두면 예전처럼 중앙에서 바로 끝난다.
+        self.overshoot_sec = overshoot_sec
+        self.overshoot_scale = overshoot_scale
         # 회피량 배율. [2026-08-21 실차] 반폭/2 로는 과하게 벌어져 0.7 로 줄였다.
         self.shift_scale = shift_scale
         self.shift_sec = shift_sec
@@ -183,6 +189,23 @@ class OvertakeBehavior:
         """
         return self._dir * self._amount * ratio
 
+    def _overshoot(self):
+        """복귀 방향으로 중앙을 지나친 목표 오프셋(픽셀).
+
+        부호가 _offset() 과 **반대**다. 회피했던 쪽의 반대쪽이므로
+        방해차량이 서 있던 차선 쪽이다 — 이미 지나친 뒤에만 쓴다.
+        크기는 회피량 x overshoot_scale.
+        """
+        return -self._dir * self._amount * self.overshoot_scale
+
+    def _finish(self):
+        """기동 종료 + 쿨다운 시작. RETURN/OVERSHOOT 둘 다 여기로 끝난다."""
+        self.reset()
+        # 복귀 직후 같은 차가 아직 앞에 있으면 즉시 재발동해 지그재그가 된다.
+        # 쿨다운 동안은 트리거를 막는다.
+        self._cooldown = self.cooldown_sec
+        self.last_reason = f"done (cooldown {self.cooldown_sec:.1f}s)"
+
     def _shift_amount(self, half_near):
         """이번 기동에서 옆으로 옮길 양(픽셀).
 
@@ -272,13 +295,26 @@ class OvertakeBehavior:
         if self.phase is OvertakePhase.RETURN:
             ratio = min(self._t / max(self.return_sec, 1e-3), 1.0)
             if ratio >= 1.0:
-                self.reset()
-                # 복귀 직후 같은 차가 아직 앞에 있으면 즉시 재발동해 지그재그가 된다.
-                # 쿨다운 동안은 트리거를 막는다.
-                self._cooldown = self.cooldown_sec
-                self.last_reason = f"done (cooldown {self.cooldown_sec:.1f}s)"
+                if self.overshoot_sec > 0.0:
+                    # 중앙에서 멈추지 않고 **반대쪽으로 더 넘어간다.**
+                    self.phase = OvertakePhase.OVERSHOOT
+                    self._t = 0.0
+                    self.last_reason = (
+                        f"overshoot {self._overshoot():+.0f}px "
+                        f"{self.overshoot_sec:.1f}s")
+                    return self._overshoot()
+                self._finish()
                 return 0.0
             return self._offset(1.0 - ratio)
+
+        if self.phase is OvertakePhase.OVERSHOOT:
+            # 복귀 방향으로 0.5초 더 꾸족 넘어간 뒤 차선 제어에 맡긴다.
+            # 오프셋을 계단으로 떨구고 끝내는 것이 맞다 — 여기서 다시 0 으로
+            # 램프를 내리면 반대쪽으로 갔다가 돌아오는 지그재그가 한 번 더 생긴다.
+            if self._t >= self.overshoot_sec:
+                self._finish()
+                return 0.0
+            return self._overshoot()
 
         return 0.0
 
