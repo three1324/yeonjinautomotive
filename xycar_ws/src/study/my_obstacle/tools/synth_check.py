@@ -57,7 +57,8 @@ TANGENT_COS = 0.50      # centerline 방향 검사 (같은 벽 짝짓기 차단)
 SIDE_HALF = 2.50        # [2026-08-22] 1.00 -> 2.50 (= RANGE_MAX, 사실상 무효)
 RANGE_MAX = 2.50        # [2026-08-22] 1.40 -> 2.50. 근거는 drive_params.yaml
 FORWARD_MIN = 0.15
-LOOKAHEAD = 0.90        # rubbercone_node 기본값과 동일
+LOOKAHEAD = 0.85        # rubbercone_node 기본값과 동일
+PURSUIT_REF = 0.24      # Pure Pursuit 기준점 = 차량 중앙 (pursuit_ref_offset_m)
 WHEELBASE = 0.333
 GAIN = 57.29578
 ANGLE_LIMIT = 35.0
@@ -232,7 +233,7 @@ def run(drop_rate=0.0, noise=0.0, seed=1, verbose=False, lateral=0.54):
                 center_err.append(dist_to_polyline(truth_c, p))
 
         # 3) 목표점 오차
-        tgt, eff, _ = geo.target_at_lookahead(path, LOOKAHEAD, AXLE)
+        tgt, eff, _ = geo.target_at_lookahead(path, LOOKAHEAD, PURSUIT_REF)
         if tgt is not None:
             prev_target = tgt
             prev_age = 0
@@ -240,7 +241,7 @@ def run(drop_rate=0.0, noise=0.0, seed=1, verbose=False, lateral=0.54):
             target_err.append(dist_to_polyline(truth_c, tgt))
 
             # 5) 뒤축 변환을 빼면 조향이 얼마나 달라지나 (옛 코드 재현)
-            good = geo.steer_pure_pursuit(tgt, AXLE, WHEELBASE, GAIN, 0.3, ANGLE_LIMIT)
+            good = geo.steer_pure_pursuit(tgt, PURSUIT_REF, WHEELBASE, GAIN, 0.3, ANGLE_LIMIT)
             naive = geo.steer_pure_pursuit(tgt, 0.0, WHEELBASE, GAIN, 0.3, ANGLE_LIMIT)
             naive_delta.append(abs(naive) - abs(good))
 

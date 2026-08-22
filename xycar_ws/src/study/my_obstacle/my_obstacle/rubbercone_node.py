@@ -60,8 +60,8 @@ S자 코스에서 성립하지 않는다는 것이 드러났다.
                  R=1.0     R=0.8     R=0.6     R=0.5
       Ld 0.75    0.070     0.088     0.117     0.141
       Ld 0.80    0.080     0.100     0.133     0.160
-      Ld 0.85    0.090     0.113     0.151     0.181
-      Ld 0.90    0.101     0.127     0.169     0.203   <- 채택 (2026-08-22)
+      Ld 0.85    0.090     0.113     0.151     0.181   <- 채택 (2026-08-22)
+      Ld 0.90    0.101     0.127     0.169     0.203
       Ld 1.10    0.151     0.189     0.252     0.303
   하한은 축거의 2배(0.67m) — 그 아래는 Pure Pursuit 이 진동한다.
 
@@ -153,18 +153,21 @@ class RubberconeNode(Node):
         # ---- Pure Pursuit ----
         self.declare_parameter('wheelbase_m', 0.333)
         self.declare_parameter('lidar_to_rear_axle_m', 0.41)
-        self.declare_parameter('lookahead_dist_m', 0.90)
+        # Pure Pursuit 기준점이 라이다에서 **뒤로** 얼마나 떨어져 있는가.
+        # [사용자 결정 2026-08-22] 0.41(뒤축) -> 0.24(차량 중앙).
+        #   라이다 0.0  ·  차량 중앙 0.24 (= 0.41 - 축거/2)  ·  뒤축 0.41
+        # 기준이 앞으로 오면 같은 목표점에 대해 alpha 가 커져 조향이 세진다.
+        # ⚠️ 교과서 Pure Pursuit 의 유도는 기준점이 뒤축일 때만 성립한다.
+        #    앞으로 당기는 것은 게인을 올린 것과 같다(모듈 docstring 1) 이
+        #    경고하는 과조향 방향). 지그재그가 나면 0.41 로 되돌릴 것.
+        self.declare_parameter('pursuit_ref_offset_m', 0.24)
+        self.declare_parameter('lookahead_dist_m', 0.85)
         self.declare_parameter('lookahead_min_m', 0.3)
         # rad -> degree 변환 상수 그 자체다 (임의의 튜닝값이 아니다).
         # xycar_motor 의 angle 명령이 실제 조향각(도)과 1:1 임이 실측됐다.
         self.declare_parameter('steer_gain', 57.29578)
         self.declare_parameter('angle_limit', 35.0)   # 기계적 한계
         self.declare_parameter('invert_steer', False)
-
-        # ---- 목표점 안정화 ----
-        # [2026-08-22] target_smoothing_alpha / max_target_step_m 를 없앴다 —
-        # 사용자 결정, 조향이 너무 약하게 들어간다는 판단. 목표점을 다듬지
-        # 않고 그대로 Pure Pursuit 에 준다. 편측/FTG 폴백은 그대로 남는다.
 
         # ---- 속도 ----
         self.declare_parameter('base_speed', 6.0)
@@ -220,7 +223,10 @@ class RubberconeNode(Node):
         self.single_side_offset_m = p('single_side_offset_m').value
 
         self.wheelbase = p('wheelbase_m').value
-        self.axle_offset = p('lidar_to_rear_axle_m').value
+        # 실측 뒤축 위치 — 디버그 표시와 근거용으로만 남긴다.
+        self.rear_axle_offset = p('lidar_to_rear_axle_m').value
+        # Pure Pursuit 이 실제로 쓰는 기준점 (기본 = 차량 중앙).
+        self.axle_offset = p('pursuit_ref_offset_m').value
         self.lookahead_dist = p('lookahead_dist_m').value
         self.lookahead_min = p('lookahead_min_m').value
         self.steer_gain = p('steer_gain').value
@@ -527,10 +533,10 @@ class RubberconeNode(Node):
                 path, self.lookahead_dist, self.axle_offset)
 
         if target is not None:
-            # [2026-08-22] 목표점 스무딩(EMA + 프레임당 clamp)을 없앴다 —
-            # 사용자 결정, 조향이 너무 약하게 들어간다는 판단. target 을
-            # 다듬지 않고 그대로 Pure Pursuit 에 넣는다. 응답은 빨라지는
-            # 대신 콘 검출이 프레임마다 튀면 조향도 그만큼 튄다.
+            # [2026-08-22 사용자 결정] 목표점 스무딩(EMA + 프레임당
+            # clamp)을 없앴다 — 조향이 너무 약하게 들어간다는 판단.
+            # 목표점을 다듬지 않고 그대로 Pure Pursuit 에 넣는다.
+            # 대가: 콘 검출이 프레임마다 튀면 조향도 그만큼 튄다.
             angle = geo.steer_pure_pursuit(
                 target, self.axle_offset, self.wheelbase, self.steer_gain,
                 self.lookahead_min, self.angle_limit)
@@ -541,7 +547,7 @@ class RubberconeNode(Node):
             angle = self._gap_follow_angle(msg)
             speed = self.base_speed * self.lost_speed_ratio
             source = 'gap_fallback'
-            # 직전 목표점은 **바로 버리지 않고 나이만 먹인다** (위 주석 참고).
+                # 직전 목표점은 **바로 버리지 않고 나이만 먹인다** (위 주석 참고).
             self._prev_target_age += 1
             if self._prev_target_age > self.prev_target_max_age:
                 self._prev_target = None
