@@ -571,11 +571,10 @@ driver_node:
       # 차선주행으로 돌아가 분기를 놓친다.
       enable_shortcut: true
       # ↑ [2026-08-22] false -> **true**. 좌회전을 다시 이 FSM 이 맡는다.
-      #   ★ left.hardcoded_enabled 를 **false 로 함께** 바꿨다.
       #     둘 다 켜면 좌회전을 두 번 시도한다.
       #
       #   왜 되돌렸나: 좌회전이 **개루프 고정 조향에서 인지 추종으로** 바뀌었다.
-      #   두 옛 구현(fsm TURN_IN / left_drive TimedLeftDrive)은 모두 차선을
+      #   옛 구현(fsm TURN_IN)은 차선을
       #   안 보고 정해진 각도로 정해진 시간 꺾는 방식이라, 진입 위치·속도가
       #   조금만 달라도 회전 반경이 통째로 어긋났고 되돌릴 방법이 없었다.
       #
@@ -590,7 +589,7 @@ driver_node:
       #   ⚠️ LIGHT_LEFT 오검출 한 번에 좌회전 분기로 간다. 되돌아오는 데
       #      15초가 걸린다. shortcut_confirm_frames 가 유일한 방어다.
       # --- 출발 신호 (2026-08-22) ---
-      start_on_green: false
+      start_on_green: true
       start_on_left: true
       # ↑ [사용자 결정] **좌회전 화살표를 봐야 출발한다.** 초록불로는 안 나간다.
       #   둘 다 true 면 둘 중 아무거나로 출발하고, 둘 다 false 면 영영
@@ -629,46 +628,6 @@ driver_node:
 
       auto_start: false
       # ↑ 신호등 없이 바로 주행. 실내 튜닝용. **실전에서는 반드시 false**
-
-    # --- 좌회전(지름길) 꺾기: 고정 조향 ---
-    # ══════════════════════════════════════════════════════════════════
-    #  좌회전 하드코딩 주행 — race_control 이식본 (2026-08-22)
-    #  구현: my_driver/left_drive.py (TimedLeftDrive)
-    #  값은 원본 mission.yaml 그대로다. **실차에서 튜닝된 값이라 손대지
-    #  않고 옮겼다.** 우리 차에서 재현되는지는 아직 확인 전이다.
-    # ══════════════════════════════════════════════════════════════════
-    left:
-      hardcoded_enabled: false
-      # ↑ [2026-08-22] true -> **false**. 좌회전을 fsm.enable_shortcut 쪽
-      #   (인지 추종, 총 15초)이 맡는다. **둘 다 켜지 말 것.**
-      #   아래 hardcoded_* 값들은 되돌릴 때를 위해 남겨 둔다.
-      # ↑ false 로 두면 fsm.enable_shortcut 쪽으로 되돌아간다. 둘 다 켜지 말 것.
-      hardcoded_speed: 12.0
-      # ↑ 좌회전 구간 내내 쓰는 고정 속도. 시작 시점에 붙잡아(held_speed)
-      #   STRAIGHT/TURN 둘 다 이 값을 쓴다 — 같은 조향각이라도 속도가 다르면
-      #   회전 반경이 달라지기 때문이다.
-      #   ⚠️ 우리 base_speed 와 단위가 같은지 확인할 것 (원본도 ERPM 계열).
-      hardcoded_straight_seconds: 1.32
-      # ↑ LEFT 표지가 사라진 뒤 분기점까지 차선을 따라 더 달릴 시간.
-      #   fsm 쪽 shortcut_arm_sec(0.5)과 같은 자리인데 값이 2.6배다.
-      #   ⚠️ 표지 소실 판정 지연이 우리와 다를 수 있다 — 우리는
-      #      light.miss_tolerance(10프레임)가 지배적이라 이미 0.5초쯤
-      #      먹고 들어간다. 그만큼 짧게 잡아야 할 수 있다.
-      hardcoded_turn_seconds: 1.20
-      hardcoded_steer_deg: 20.0
-      # ↑ 꺾을 조향각. **부호: 양수가 좌회전**(shortcut.turn_angle 주석의 근거 셋).
-      #   fsm 쪽 turn_angle(35.0)보다 작지만, 이쪽은 steering.follow_external()
-      #   로 **변화율 제한을 통과**하므로 궤적이 곧바로 비교되지는 않는다.
-      clear_frames: 3
-      # ↑ LEFT 가 이만큼 연속으로 안 보여야 "지나갔다"로 보고 시작한다.
-      confirm_frames: 5
-      # ↑ LEFT 가 이만큼 연속 확정돼야 발동한다. 오검출 한 번에 좌회전하면
-      #   차가 트랙 왼쪽 끝으로 붙으므로 이것이 유일한 방어다.
-      #   원본은 2였지만 우리 fsm 의 shortcut_confirm_frames(5)를 따른다.
-      overtake_block_enabled: true
-      overtake_block_seconds: 15.0
-      # ↑ 좌회전 완료 후 이만큼 회피를 막는다. 지름길은 화면이 평소와 달라
-      #   YOLO 가 차량을 오검출하기 쉽다.
 
     # TURN_IN 위상 동안 내는 **원시 명령**이다. 이 값이 그대로 모터로 간다 —
     # 차선 오프셋도, 조향 rate limit 도 개입하지 않는다. 그게 목적이다:

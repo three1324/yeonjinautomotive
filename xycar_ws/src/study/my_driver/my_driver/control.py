@@ -92,7 +92,9 @@ class SteeringController:
         """바깥에서 준 목표 조향각을 **변화율 제한만 걸어** 따라간다.
 
         [2026-08-22] race_control/control.py 에서 그대로 옮겼다. 좌회전
-        하드코딩 주행(left_drive.TimedLeftDrive)의 TURN 위상이 쓴다.
+        하드코딩 주행(TimedLeftDrive)의 TURN 위상이 쓰던 것인데, 그 구현을
+        2026-08-23 에 지우면서 **지금은 호출하는 곳이 없다.** 외부 조향을
+        rate limit 만 걸어 따라가는 일반 유틸이라 남겨 둔다.
 
         update() 와 다른 점: 차선 오차를 안 본다. 목표각이 이미 정해져
         있으므로 P/D 계산 없이 rate limit 과 상한만 통과시킨다.
