@@ -18,9 +18,19 @@
                          ros2 launch my_bringup drive.launch.py rviz:=true
                      ⚠️ 시각화는 CPU 를 쓴다. 기록 주행/실전에서는 둘 다 false 로 둘 것.
 
-안전: driver_node 는 require_enable=true 이므로 이 launch 를 띄워도 차는 움직이지 않는다.
-      출발시키려면 별도로:
-          ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
+안전: **이 launch 만으로 주행 준비가 끝난다** (require_enable=false, 2026-08-22).
+      /drive_enable 을 따로 쏠 필요가 없다. 안전장치가 사라진 게 아니라
+      신호등으로 옮겨간 것이다 — fsm.auto_start 가 false 라 WAIT_LIGHT 에서
+      초록불(또는 좌회전 화살표) 확정까지 서 있는다.
+      ⚠️ 뒤집어 말하면 **신호등 오검출 한 번에 출발한다.** 벤치에서 차를
+         들어올리고 테스트할 때는 drive_params.yaml 의 require_enable 을
+         true 로 되돌리고, 그때는 다음이 다시 필요하다:
+             ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'
+
+⚠️ 모터는 이 launch 에 없다. 이 차량의 모터/VESC 는 ROS1 도커
+   (ros1_container + ros1_bridge)가 담당하며 **따로 띄워야** 한다
+   (xycar_ws/etc/motor_vesc/motor 참고). 그게 안 떠 있으면 노드는 다 뜨고
+   /xycar_motor 로 명령도 나가지만 바퀴는 안 움직인다.
 """
 
 import os
@@ -146,7 +156,7 @@ def generate_launch_description():
     # ※ obstacle_node 는 없다 (2026-08-21 삭제). 라이다 복도 추정/섹터 거리는
     #   주행에 쓰지 않기로 했고, 시각화만을 위해 라이다를 상시 돌릴 이유가 없다.
     #   라이다를 쓰는 노드는 아래 rubbercone_node 하나뿐이다.
-    # --- 라바콘 구간 전담 (팀원 실차 검증 구현을 그대로 가져온 노드) ---
+    # --- 라바콘 구간 전담 (2026-08-22 개편판: 사슬 중심선 + 뒤축 Pure Pursuit) ---
     # 스스로 구간을 판정하고 조향·속도까지 만든다. driver_node 는 구간일 때
     # 그 명령(/cone_cmd)을 그대로 통과시키기만 한다.
     # drive_topic 을 xycar_motor 가 아니라 cone_cmd 로 돌리는 것이 핵심 —

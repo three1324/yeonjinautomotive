@@ -1,62 +1,88 @@
 #!/usr/bin/env python3
-# rubbercone_node.py (xycar_planning package)
-#
-# 시뮬레이션에서 검증된 두 접근(콘 페어링 + Pure Pursuit, Follow-the-Gap 폴백)을
-# 오늘 실제 하드웨어 테스트로 검증한 안전장치(모양 필터, 최소 간격 검사, 목표점
-# 급변 제한)와 합친 버전. S자 커브 대응력 향상이 핵심 목표.
-#
-# 변경 핵심:
-#   1. 고정/자동 거리구간(bin) 스캔 방식 -> "가장 가까운 왼쪽 콘 + 그와 전후방
-#      거리(x)가 가장 비슷한 오른쪽 콘"을 짝짓는 방식으로 교체. S자 커브에서
-#      같은 열 콘끼리 잘못 짝지어지는 문제를 구조적으로 줄임.
-#   2. 단순 PD 대신 휠베이스 기반 Pure Pursuit 조향식 사용.
-#   3. 콘을 하나도 못 찾으면 Follow-the-Gap으로 안전하게 폴백.
-#   4. 부채꼴(각도+거리) 기반 구간 진입/이탈 감지, 연속 프레임 카운팅으로
-#      노이즈에 의한 오탐 방지. '/rubbercone/zone_active'로 발행 (나중에
-#      mission_node가 참고할 수 있음).
-#
-# 실측 검증된 것 (오늘 하드웨어 테스트로 확인):
-#   - 라이다 실제 드라이버: xycar_lidar_node (YDLIDAR, /dev/ttyUSB1, 230400bps)
-#   - 모터 토픽: 'xycar_motor', Float32MultiArray, data=[angle, speed]
-#
-# 아직 실측 필요:
-#   - wheelbase_m: 기본값은 추정치. 실제 차량 앞뒤 축간거리를 자로 재서 넣을 것.
-#   - steer_gain, angle_offset_deg: 시뮬레이션 값 그대로 가져온 것. 실차에서
-#     angle_offset_deg부터 먼저 보정(정면에 물체 하나 놓고 y=0 확인)한 뒤,
-#     steer_gain은 실제 조향 반응 보고 튜닝할 것.
-#
-# IMPORTANT: lane_control_node와 동시에 켜지 마세요. 둘 다 'xycar_motor'에
-# 발행해서 충돌합니다.
-#
-# ── 우리 저장소에서 바뀐 점 (2026-08-21) ──────────────────────────────
-#   1. drive_topic 기본값 : xycar_motor -> cone_cmd
-#      zone_topic  기본값 : /rubbercone/zone_active -> /cone_zone_active
-#      우리 시스템에서 모터에 쏘는 노드는 driver_node 하나뿐이고, 이 노드의
-#      출력은 driver_node 가 콘 구간에서만 통과시킨다(mux). 기본값이 모터
-#      토픽이면 params 누락 한 번에 두 노드가 동시에 모터를 잡는다 —
-#      실제로 그 사고가 있었다(launch 의 params_file 누수).
-#
-#   2. /cone_cmd 발행을 **스캔 주기에서 분리해 30Hz 고정**으로 바꿨다.
-#      원본은 scan_callback 안에서 바로 발행했는데, YDLIDAR 스캔이
-#      10Hz 안팎이고 간헐적으로 더 늦어진다. driver_node 는 명령이
-#      cone_cmd_timeout 넘게 안 오면 콘 구간에서 정지시키므로, 스캔이
-#      한 번 늦을 때마다 차가 끊겨 섰다. 계산은 스캔이 올 때 하고,
-#      발행만 타이머로 뗀다.
-#      단, 스캔 자체가 죽으면 옛 값을 계속 쏘면 안 된다 —
-#      scan_stale_timeout_sec 넘으면 정지값(0,0)을 낸다.
-#
-#   알고리즘(클러스터링/페어링/Pure Pursuit/FTG/속도)은 팀원 검증본 그대로다.
-# ────────────────────────────────────────────────────────────────────
+"""라바콘 구간 전담 주행 노드 — 라이다로 콘 복도를 찾아 /cone_cmd 를 낸다.
+
+driver_node 가 콘 구간(카메라 YOLO 판정)일 때 이 노드의 명령을 xycar_motor 로
+**그대로 통과**시킨다. 이 노드는 모터에 직접 쏘지 않는다.
+
+────────────────────────────────────────────────────────────────────────
+2026-08-22 개편 — 무엇을 왜 바꿨나
+
+실측 치수가 확정되면서(my_obstacle/geometry.py 상단) 기존 구현의 전제가
+S자 코스에서 성립하지 않는다는 것이 드러났다.
+
+  1) ★ Pure Pursuit 기준점이 틀렸다 (가장 큰 결함)
+     옛 _steer_to_target() 은 **라이다 원점을 뒤축으로 취급**했다. 라이다는
+     뒤축보다 0.41m 앞에 있으므로 alpha 가 과대평가돼 **약 2배 과조향**이
+     났다(목표 (1.0,0.3): 10.4도 vs 올바른 5.5도). 좌우 여유가 0.20m 인
+     복도에서 2배 과조향은 그대로 지그재그 접촉이다. steer_gain 을 아무리
+     만져도 안 없어진다 — 기준점 자체가 틀렸기 때문.
+
+  2) 좌우를 y 부호로 나눌 수 없다
+     S자 커브에서 **바깥 벽 콘이 r=1.1m 부터 y>0 으로 넘어온다.**
+     옛 `y > 0.1 / y < -0.1` 로는 반대편 줄로 들어가 목표가 뒤집힌다.
+     -> 콘 사이 거리로 잇는 **사슬**로 교체 (geometry.build_chains).
+
+  3) 부채꼴 ROI 가 커브 안쪽 벽을 잘라낸다
+     옛 `max_angle_deg=100` 은 사실상 반원이라 옆·뒤 벽을 다 끌어왔고,
+     그렇다고 직사각형으로만 자르면 커브에서 y 가 가파르게 오르는 **안쪽
+     벽이 통째로 탈락**한다(검산: 좌벽 1개만 남음). 직사각형(|y|)에
+     **거리 상한**을 얹어 모서리를 깎은 형태로 바꿨다.
+
+  4) 콘 페어 1쌍이 아니라 중심선 전체를 만든다
+     옛 코드는 "가장 가까운 좌콘 + x 가 비슷한 우콘" 한 쌍의 중점만 썼다.
+     lookahead 가 콘 배치에 따라 프레임마다 달라져 응답이 예측 불가였다.
+     이제 좌우 벽의 **최근접 대응**으로 중심선을 만들고, 그 위에서 뒤축
+     기준 고정 거리(lookahead_dist_m)의 점을 목표로 삼는다.
+
+  5) 편측 폴백이 커브에서 0.26m 틀렸다
+     옛 코드는 y 축으로만 밀었다(`ly - offset`). 폴리라인 **법선**으로
+     밀도록 고쳤다 (geometry.offset_from_single_wall 참고).
+
+  6) 복도 폭 상한이 없었다
+     `min_gap_m` 만 있어서, 한쪽 벽이 비면 반대편 트랙 콘과 짝지어 폭 1.5m
+     짜리 중심선이 생길 수 있었다. `max_gap_m` 을 추가했다.
+
+★ 롤백: `pairing_mode: nearest_pair` 로 두면 옛 페어링 경로가 그대로 돈다
+  (실차에서 검증됐던 코드다). 재시작 없이 바꿀 수 있다:
+      ros2 param set /rubbercone_node pairing_mode nearest_pair
+  단 위 1)번(뒤축 변환)은 **스위치 없이 항상 적용**한다 — 옛 경로도 그
+  오차 위에서 돌고 있었기 때문이다.
+
+────────────────────────────────────────────────────────────────────────
+코스 형상 (2026-08-22 확인) — 파라미터의 근거
+
+  S자: 진입 -> 좌 -> 우 -> 좌.  반파장(좌로 갔다 중앙 복귀) 경로장 약 1.5m.
+  역산하면 중심선 반경 R ~ 1.0~1.5m (횡변위 0.37~0.54m).
+
+  그래서 lookahead 를 길게 잡으면 **변곡점 너머를 겨냥해 S자를 가로지른다.**
+  0.80m(뒤축 기준)는 반파장의 27% 앞을 본다. 코너 컷은 lookahead^2/(8R),
+  좌우 여유는 0.20m:
+                 R=1.0     R=0.8     R=0.6     R=0.5
+      Ld 0.75    0.070     0.088     0.117     0.141
+      Ld 0.80    0.080     0.100     0.133     0.160   <- 채택 (2026-08-22)
+      Ld 0.85    0.090     0.113     0.151     0.181   <- 이전
+  하한은 축거의 2배(0.67m) — 그 아래는 Pure Pursuit 이 진동한다.
+
+  [2026-08-22 실차] 급커브에서 못 꺾고 안쪽 콘을 쳤다. 0.85 -> 0.80 으로
+  **최소폭만** 줄였다(사용자 결정) — 짧게 볼수록 직선 응답이 나빠진다.
+  같은 건에서 목표점 clamp 순서 버그도 같이 고쳤고 영향은 그쪽이 더 크다
+  (scan_callback 의 ★ 주석). 그래도 남으면 다음 수는 곡률 적응 lookahead
+  다 — 커브에서만 짧게 보고 직선은 길게. 단 하한 0.67m 때문에 R<0.5 인
+  커브는 그것으로도 못 산다.
+"""
 
 import math
-import numpy as np
+
 import cv2
+import numpy as np
 import rclpy
+from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan, Image
-from std_msgs.msg import Float32MultiArray, Bool
-from cv_bridge import CvBridge
+from sensor_msgs.msg import Image, LaserScan
+from std_msgs.msg import Bool, Float32MultiArray
+
+from my_obstacle import geometry as geo
 
 
 class RubberconeNode(Node):
@@ -65,64 +91,80 @@ class RubberconeNode(Node):
 
         # ---- 공통 ----
         self.declare_parameter('scan_topic', 'scan')
-        # ★ 기본값을 절대 'xycar_motor' 로 두지 않는다 — 헤더 주석 참고.
+        # ★ 기본값은 절대 'xycar_motor' 로 두지 않는다 (2026-08-21).
+        #   원본 기본값이 모터 토픽이었다. params 파일이 한 번이라도 안 실리면
+        #   이 노드가 driver_node 와 같이 모터에 쏘게 되고, 콘 구간이 아닌
+        #   곳에서도 차가 라이다 명령대로 움직인다.
         self.declare_parameter('drive_topic', 'cone_cmd')
         self.declare_parameter('debug_topic', '/rubbercone/debug_image')
         self.declare_parameter('zone_topic', '/cone_zone_active')
 
-        # ---- 좌표계 보정 (실측 필요, 오늘 라이다 검증 때 쓰던 것과 동일) ----
         self.declare_parameter('angle_offset_deg', 0.0)
 
-        # ---- 관심영역(ROI) - 콘 탐지용 ----
+        # ---- ROI: 직사각형 + 거리 상한 ----
+        # 부채꼴(max_angle_deg)을 버린 이유는 모듈 docstring 3) 참고.
         self.declare_parameter('forward_min', 0.15)
-        self.declare_parameter('forward_max', 2.5)
-        self.declare_parameter('max_angle_deg', 100.0)
+        self.declare_parameter('side_half_m', 1.00)
+        self.declare_parameter('range_max_m', 1.40)
 
         # ---- 클러스터링 + 콘 모양 필터 ----
+        # 콘 표면 간 실제 간격은 0.434 - 0.10 = 0.334m 라 0.15 는 안전하다.
         self.declare_parameter('cluster_gap_m', 0.15)
         self.declare_parameter('cluster_min_points', 2)
-        self.declare_parameter('cluster_max_span_m', 0.4)  # 이보다 크면 벽/사람 등으로 간주해 버림
-        self.declare_parameter('cone_merge_dist_m', 0.25)  # 이보다 가까운 콘 중심점끼리는 같은 콘으로 보고 합침
+        # 콘 하나의 span 은 0.10m. 옛 0.4 는 벽 조각을 콘으로 통과시켰다.
+        self.declare_parameter('cluster_max_span_m', 0.20)
+        # 반드시 콘 간격 0.434 보다 작아야 한다 (안 그러면 이웃 콘이 병합된다).
+        self.declare_parameter('cone_merge_dist_m', 0.20)
 
-        # ---- 콘 페어링 (핵심 변경 지점) ----
-        self.declare_parameter('pair_max_x_diff_m', 0.5)   # 좌우 콘의 전후방 거리 차가 이보다 크면 짝 안 지음
-        self.declare_parameter('min_gap_m', 0.5)            # 짝지은 폭이 이보다 좁으면 같은 열 콘으로 보고 버림
-        self.declare_parameter('single_side_offset_m', 0.35)  # 한쪽만 보일 때 반대쪽으로 띄우는 폭
+        # ---- 좌/우 사슬 ----
+        # 0.434(콘 간격) < 0.60 < 0.80(복도 폭). 곡률과 무관하게 성립한다.
+        self.declare_parameter('cone_chain_max_dist_m', 0.60)
+        self.declare_parameter('chain_extend_m', 0.55)
+        self.declare_parameter('chain_reassign_dist_m', 0.30)
+        self.declare_parameter('chain_min_cones', 2)
 
-        # ---- Pure Pursuit 조향 ----
-        self.declare_parameter('wheelbase_m', 0.26)   # 실측 필요
+        # ---- 중심선 폭 검증 ----
+        self.declare_parameter('min_gap_m', 0.60)
+        self.declare_parameter('max_gap_m', 1.00)
+        self.declare_parameter('single_side_offset_m', 0.40)   # = 복도폭/2
+
+        # ---- Pure Pursuit ----
+        self.declare_parameter('wheelbase_m', 0.333)
+        self.declare_parameter('lidar_to_rear_axle_m', 0.41)
+        self.declare_parameter('lookahead_dist_m', 0.80)
         self.declare_parameter('lookahead_min_m', 0.3)
-        # 라이다 -> 뒷축 거리(m). Pure Pursuit 는 **뒷축 기준** 식이다.
-        self.declare_parameter('lidar_to_rear_axle_m', 0.30)
-        self.declare_parameter('steer_gain', 120.0)   # rad -> angle 스케일 (시뮬레이션 값, 실차 재튜닝 필요)
-        self.declare_parameter('angle_limit', 50.0)
+        # rad -> degree 변환 상수 그 자체다 (임의의 튜닝값이 아니다).
+        # xycar_motor 의 angle 명령이 실제 조향각(도)과 1:1 임이 실측됐다.
+        self.declare_parameter('steer_gain', 57.29578)
+        self.declare_parameter('angle_limit', 35.0)   # 기계적 한계
         self.declare_parameter('invert_steer', False)
 
-        # ---- 목표점 안정화 (오늘 실제로 필요했던 안전장치) ----
+        # ---- 목표점 안정화 ----
         self.declare_parameter('target_smoothing_alpha', 0.5)
-        self.declare_parameter('max_target_step_m', 0.12)
+        self.declare_parameter('max_target_step_m', 0.20)
 
         # ---- 속도 ----
-        self.declare_parameter('base_speed', 8.0)  # 실측 확인: 8 이상에서 급커브 멈춤 없이 안정적 (min_absolute_speed=5와 조합)
-        self.declare_parameter('min_speed_ratio', 0.4)  # 급조향 시 base_speed 대비 최소 남기는 비율
-        self.declare_parameter('min_absolute_speed', 5.0)  # 위 비율 계산과 무관하게 이 값 밑으로는 안 내려감 (모터 저속 한계 이상으로 유지)
-        self.declare_parameter('lost_speed_ratio', 0.7)  # 콘을 못 찾아 FTG 폴백할 때 감속 비율
+        self.declare_parameter('base_speed', 6.0)
+        self.declare_parameter('min_speed_ratio', 0.4)
+        self.declare_parameter('lost_speed_ratio', 0.7)
 
         # ---- Follow-the-Gap 폴백 ----
         self.declare_parameter('car_width_m', 0.3)
         self.declare_parameter('max_steering_angle_rad', 0.4)
 
-        # ---- 구간 진입/이탈 감지 (부채꼴: 각도+거리) ----
+        # ---- 롤백 스위치 ----
+        # 직전 목표점을 몇 프레임까지 들고 갈지 (10Hz 기준 5 = 0.5s).
+        self.declare_parameter('prev_target_max_age', 5)
+        self.declare_parameter('pairing_mode', 'chain')   # chain | nearest_pair
+        self.declare_parameter('pair_max_x_diff_m', 0.5)  # nearest_pair 전용
+
+        # ---- 구간 진입/이탈 감지 (진단 전용. driver_node 는 카메라로 판정한다) ----
         self.declare_parameter('zone_near_m', 0.2)
         self.declare_parameter('zone_far_m', 1.5)
         self.declare_parameter('zone_half_angle_deg', 55.0)
         self.declare_parameter('zone_point_threshold', 20)
         self.declare_parameter('zone_enter_frames', 5)
         self.declare_parameter('zone_exit_frames', 5)
-
-        # ---- 발행 주기 (스캔 주기와 분리) ----
-        self.declare_parameter('publish_rate_hz', 30.0)
-        self.declare_parameter('scan_stale_timeout_sec', 0.5)
 
         p = self.get_parameter
         self.scan_topic = p('scan_topic').value
@@ -133,21 +175,27 @@ class RubberconeNode(Node):
         self.angle_offset = math.radians(p('angle_offset_deg').value)
 
         self.forward_min = p('forward_min').value
-        self.forward_max = p('forward_max').value
-        self.max_angle = math.radians(p('max_angle_deg').value)
+        self.side_half = p('side_half_m').value
+        self.range_max = p('range_max_m').value
 
         self.cluster_gap_m = p('cluster_gap_m').value
         self.cluster_min_points = p('cluster_min_points').value
         self.cluster_max_span_m = p('cluster_max_span_m').value
         self.cone_merge_dist_m = p('cone_merge_dist_m').value
 
-        self.pair_max_x_diff_m = p('pair_max_x_diff_m').value
+        self.chain_max_dist = p('cone_chain_max_dist_m').value
+        self.chain_extend = p('chain_extend_m').value
+        self.chain_reassign = p('chain_reassign_dist_m').value
+        self.chain_min_cones = p('chain_min_cones').value
+
         self.min_gap_m = p('min_gap_m').value
+        self.max_gap_m = p('max_gap_m').value
         self.single_side_offset_m = p('single_side_offset_m').value
 
         self.wheelbase = p('wheelbase_m').value
+        self.axle_offset = p('lidar_to_rear_axle_m').value
+        self.lookahead_dist = p('lookahead_dist_m').value
         self.lookahead_min = p('lookahead_min_m').value
-        self.lidar_to_rear_axle = p('lidar_to_rear_axle_m').value
         self.steer_gain = p('steer_gain').value
         self.angle_limit = p('angle_limit').value
         self.invert_steer = p('invert_steer').value
@@ -157,11 +205,13 @@ class RubberconeNode(Node):
 
         self.base_speed = p('base_speed').value
         self.min_speed_ratio = p('min_speed_ratio').value
-        self.min_absolute_speed = p('min_absolute_speed').value
         self.lost_speed_ratio = p('lost_speed_ratio').value
 
         self.car_width = p('car_width_m').value
         self.max_steering_angle_rad = p('max_steering_angle_rad').value
+
+        self.pair_max_x_diff_m = p('pair_max_x_diff_m').value
+        self.prev_target_max_age = p('prev_target_max_age').value
 
         self.zone_near_m = p('zone_near_m').value
         self.zone_far_m = p('zone_far_m').value
@@ -169,39 +219,40 @@ class RubberconeNode(Node):
         self.zone_point_threshold = p('zone_point_threshold').value
         self.zone_enter_frames = p('zone_enter_frames').value
         self.zone_exit_frames = p('zone_exit_frames').value
-        self.publish_rate_hz = p('publish_rate_hz').value
-        self.scan_stale_timeout_sec = p('scan_stale_timeout_sec').value
 
         self.bridge = CvBridge()
         self.smoothed_y = None
-        self.last_time = self.get_clock().now()
+        self._prev_target = None
+        self._prev_target_age = 0
+        # 직전 프레임의 목표점. 편측 폴백에서 미는 방향을 시간 연속성으로
+        # 가르는 데 쓴다 (geo.resolve_side). 오도메트리가 없어 프레임 간
+        # 좌표 이동을 보정하지 않지만, 10Hz·저속에서 이동은 0.06m 수준이고
+        # 두 후보는 0.80m 떨어져 있어 판정에는 충분하다.
+        #
+        # ★ 경로를 못 낸 프레임에도 **바로 버리지 않는다.** 버리면 다음
+        #   프레임도 근거가 없어 또 거부하는 **연쇄**가 생긴다(합성검증에서
+        #   경로없음이 15% -> 55% 로 폭증했다). prev_target_max_age 프레임
+        #   까지는 들고 간다 — 그동안 차는 0.3m 남짓 움직이는데 두 후보는
+        #   0.80m 떨어져 있어 여전히 충분히 가른다.
         self.zone_active = False
         self.dense_count = 0
         self.sparse_count = 0
 
-        # 스캔이 계산해 둔 최신 명령. 타이머가 이걸 30Hz 로 다시 쏜다.
-        self._last_angle = 0.0
-        self._last_speed = 0.0
-        self._last_scan_time = None
-
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, qos)
+        self.scan_sub = self.create_subscription(
+            LaserScan, self.scan_topic, self.scan_callback, qos)
 
         self.drive_pub = self.create_publisher(Float32MultiArray, self.drive_topic, 1)
         self.debug_pub = self.create_publisher(Image, self.debug_topic, 10)
         self.zone_pub = self.create_publisher(Bool, self.zone_topic, 10)
 
-        self.publish_timer = self.create_timer(
-            1.0 / self.publish_rate_hz, self._publish_timer_cb)
-
         self.get_logger().info(
-            'rubbercone_node started. scan: ' + self.scan_topic +
-            ' -> drive: ' + self.drive_topic +
-            f' (publish {self.publish_rate_hz:.0f}Hz)')
+            'rubbercone_node started. scan: %s -> drive: %s (mode=%s, axle=%.2fm)'
+            % (self.scan_topic, self.drive_topic,
+               p('pairing_mode').value, self.axle_offset))
 
-    # ==================== 라이다 -> 차량 로컬 좌표 (전방=+x, 좌측=+y) ====================
+    # ============ 라이다 -> 차량 로컬 좌표 (전방=+x, 좌측=+y) ============
     def _scan_to_points(self, msg: LaserScan):
-        """ROI 없이 전체 유효 포인트를 반환 (구간 감지용으로도 재사용)."""
         points = []
         angle = msg.angle_min
         for r in msg.ranges:
@@ -212,26 +263,40 @@ class RubberconeNode(Node):
             if r < msg.range_min or r > msg.range_max:
                 continue
             a_corrected = a + self.angle_offset
-            x = r * math.cos(a_corrected)
-            y = r * math.sin(a_corrected)
-            points.append((x, y))
+            points.append((r * math.cos(a_corrected), r * math.sin(a_corrected)))
         return points
 
     def _apply_roi(self, points):
-        return [(x, y) for (x, y) in points
-                if self.forward_min <= x <= self.forward_max
-                and abs(math.atan2(y, x)) <= self.max_angle]
+        """직사각형(전방 x, 폭 |y|) + 거리 상한. 모서리를 깎은 형태다.
+
+        거리 상한이 왜 필요한가: 순수 직사각형이면 커브에서 **안쪽 벽이
+        잘린다.** 안쪽 벽은 y 가 가파르게 올라가기 때문이다(검산에서 좌벽이
+        1개만 남았다). 커브에서는 "얼마나 앞"이 아니라 "얼마나 가까이"가
+        올바른 경계다.
+        폭 상한(|y|)은 남겨둔다 — 차 바로 옆의 벽·기둥을 잘라낸다.
+        """
+        out = []
+        for (x, y) in points:
+            if x < self.forward_min:
+                continue
+            if abs(y) > self.side_half:
+                continue
+            if math.hypot(x, y) > self.range_max:
+                continue
+            out.append((x, y))
+        return out
 
     # ==================== 클러스터링 + 콘 모양 필터 ====================
     def _cluster_and_filter(self, points):
         if not points:
             return []
-        pts = sorted(points, key=lambda p: math.atan2(p[1], p[0]))
+        pts = sorted(points, key=lambda q: math.atan2(q[1], q[0]))
 
         clusters = []
         current = [pts[0]]
         for pt in pts[1:]:
-            if math.hypot(pt[0] - current[-1][0], pt[1] - current[-1][1]) <= self.cluster_gap_m:
+            if math.hypot(pt[0] - current[-1][0],
+                          pt[1] - current[-1][1]) <= self.cluster_gap_m:
                 current.append(pt)
             else:
                 clusters.append(current)
@@ -242,26 +307,23 @@ class RubberconeNode(Node):
         for c in clusters:
             if len(c) < self.cluster_min_points:
                 continue
-            xs = [pt[0] for pt in c]
-            ys = [pt[1] for pt in c]
+            xs = [q[0] for q in c]
+            ys = [q[1] for q in c]
             span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
             if span > self.cluster_max_span_m:
-                continue  # 벽/사람 등 큰 물체는 콘이 아니라고 보고 버림
+                continue  # 벽/사람 등 큰 물체는 콘이 아니다
             cones.append((sum(xs) / len(xs), sum(ys) / len(ys)))
         return self._merge_nearby_cones(cones)
 
     def _merge_nearby_cones(self, cones):
-        """라바콘 표면 반사가 고르지 않아 하나의 콘이 두 개 이상의 클러스터로
-        쪼개지는 경우가 있음. 모양 필터를 통과한 작은 클러스터 중심점끼리
-        cone_merge_dist_m 이내로 가까우면 같은 콘으로 보고 평균 위치로 합침
-        (single-linkage 방식, 더 이상 합쳐질 게 없을 때까지 반복)."""
         merged = list(cones)
         changed = True
         while changed and len(merged) > 1:
             changed = False
             for i in range(len(merged)):
                 for j in range(i + 1, len(merged)):
-                    d = math.hypot(merged[i][0] - merged[j][0], merged[i][1] - merged[j][1])
+                    d = math.hypot(merged[i][0] - merged[j][0],
+                                   merged[i][1] - merged[j][1])
                     if d <= self.cone_merge_dist_m:
                         mx = (merged[i][0] + merged[j][0]) / 2.0
                         my = (merged[i][1] + merged[j][1]) / 2.0
@@ -274,63 +336,63 @@ class RubberconeNode(Node):
                     break
         return merged
 
-    # ==================== 콘 페어링: 가장 가까운 왼쪽 콘 + x가 가장 비슷한 오른쪽 콘 ====================
+    # ==================== 경로 생성 ====================
+    def _plan_path(self, cones):
+        """콘 -> (중심선, 좌사슬, 우사슬, 출처). 중심선은 라이다 좌표."""
+        left, right = geo.build_chains(
+            cones, self.chain_max_dist, self.chain_extend,
+            self.chain_reassign, self.chain_min_cones,
+            self.min_gap_m, self.max_gap_m)
+
+        if left and right:
+            path = geo.centerline(left, right, self.min_gap_m,
+                                  self.max_gap_m, self.chain_extend)
+            if path:
+                return path, left, right, 'center'
+
+        # 한쪽 벽만 — 커브 안쪽 벽은 콘이 원래 성기므로 **정상 경로**다.
+        # 어느 쪽으로 밀지는 수직 판정 + 직전 목표점(시간 연속성)으로 정한다.
+        # y 부호로 정하면 벽이 차에서 방사 방향으로 보이는 프레임에서 반대로
+        # 밀려 목표점이 0.80m — 복도 폭만큼 — 어긋난다 (geo.resolve_side 참고).
+        for chain in (left, right):
+            if len(chain) >= 2:
+                cs, conf = geo.corridor_side(chain)
+                side = geo.resolve_side(chain, self.single_side_offset_m,
+                                        cs, conf, self._prev_target)
+                if side is None:
+                    # 미는 방향의 근거가 없다. 추측하면 복도 폭만큼 반대로
+                    # 간다 — 이 벽은 쓰지 않고 FTG 로 넘긴다.
+                    continue
+                path = geo.offset_from_single_wall(
+                    chain, self.single_side_offset_m, side)
+                if path:
+                    return path, left, right, 'wall'
+        return [], left, right, 'none'
+
+    # ==================== 옛 페어링 (pairing_mode=nearest_pair) ====================
     def _find_pair_target(self, cones):
-        left = sorted([(x, y) for (x, y) in cones if y > 0.1], key=lambda p: p[0])
-        right = sorted([(x, y) for (x, y) in cones if y < -0.1], key=lambda p: p[0])
+        """2026-08-22 이전의 구현. 실차 검증은 됐지만 S자에서 좌우가 뒤집힌다.
+
+        롤백 경로로만 남긴다 — 모듈 docstring 의 '롤백' 참고.
+        """
+        left = sorted([(x, y) for (x, y) in cones if y > 0.1], key=lambda q: q[0])
+        right = sorted([(x, y) for (x, y) in cones if y < -0.1], key=lambda q: q[0])
 
         if left and right:
             lc = left[0]
-            rc = min(right, key=lambda p: abs(p[0] - lc[0]))
-            x_diff = abs(lc[0] - rc[0])
-            gap = lc[1] - rc[1]  # 왼쪽 y(+) - 오른쪽 y(-) = 통로 폭
-            if x_diff <= self.pair_max_x_diff_m and gap >= self.min_gap_m:
-                return (lc[0] + rc[0]) / 2.0, (lc[1] + rc[1]) / 2.0, left, right
-
+            rc = min(right, key=lambda q: abs(q[0] - lc[0]))
+            if (abs(lc[0] - rc[0]) <= self.pair_max_x_diff_m
+                    and (lc[1] - rc[1]) >= self.min_gap_m):
+                return [((lc[0] + rc[0]) / 2.0, (lc[1] + rc[1]) / 2.0)], left, right, 'pair'
         if left:
             lx, ly = left[0]
-            return lx, ly - self.single_side_offset_m, left, right
+            return [(lx, ly - self.single_side_offset_m)], left, right, 'pair'
         if right:
             rx, ry = right[0]
-            return rx, ry + self.single_side_offset_m, left, right
-        return None, None, left, right
+            return [(rx, ry + self.single_side_offset_m)], left, right, 'pair'
+        return [], left, right, 'none'
 
-    # ==================== Pure Pursuit 조향 ====================
-    def _steer_to_target(self, tx, ty):
-        """목표점(라이다 좌표)으로 향하는 조향각(도).
-
-        ────────────────────────────────────────────────────────────
-        왜 tx 에 lidar_to_rear_axle 을 더하나 (2026-08-21 실차)
-
-        Pure Pursuit 의 delta = atan(2 L sin(alpha) / ld) 는 **뒷축을 원점으로**
-        유도된 식이다. 그런데 tx, ty 는 차 맨 앞에 달린 라이다 좌표다.
-        보정 없이 넣으면 목표점이 실제보다 lidar_to_rear_axle 만큼 **가깝다**고
-        계산되고, 가까울수록 이 식은 조향을 급격히 세게 낸다.
-
-        실차 증상이 정확히 그것이었다 — 콘 페어링과 목표점은 잘 잡히는데
-        차가 아직 게이트 뒤에 있는 상태에서 이미 풀락으로 꺾어 콘을 쳤다.
-
-        보정 전후 (축거 0.333, 횡오차 0.3m):
-            라이다 0.40m -> 35.0도(풀락)  ->  19.0도
-            라이다 0.50m -> 30.4도        ->  15.3도
-        보정을 넣으면 풀락 구간 자체가 사라진다.
-
-        ty 는 보정하지 않는다 — 라이다가 차 중심선 위에 있으면 횡방향
-        오프셋은 0 이다. 중심선에서 벗어나 있으면 angle_offset_deg 가 아니라
-        여기에 횡 보정을 따로 넣어야 한다 (지금은 중심 장착 가정).
-        ────────────────────────────────────────────────────────────
-        """
-        # 라이다 좌표 -> 뒷축 좌표
-        tx = tx + self.lidar_to_rear_axle
-        dist = math.hypot(tx, ty)
-        if dist < 1e-3:
-            return 0.0
-        ld = max(dist, self.lookahead_min)
-        delta_rad = math.atan2(2.0 * self.wheelbase * (ty / dist), ld)
-        angle = delta_rad * self.steer_gain
-        return float(np.clip(angle, -self.angle_limit, self.angle_limit))
-
-    # ==================== Follow-the-Gap 폴백 (콘을 하나도 못 찾았을 때) ====================
+    # ============ Follow-the-Gap 폴백 (콘을 하나도 못 찾았을 때) ============
     def _gap_follow_angle(self, msg: LaserScan):
         ranges = np.array(msg.ranges, dtype=np.float32)
         ranges = np.where(np.isnan(ranges), 0.0, ranges)
@@ -369,21 +431,28 @@ class RubberconeNode(Node):
         mapped = -(steering_angle_rad / self.max_steering_angle_rad) * self.angle_limit
         return float(np.clip(mapped, -self.angle_limit, self.angle_limit))
 
-    # ==================== 구간 진입/이탈 감지 (부채꼴: 각도+거리) ====================
+    # ============ 구간 진입/이탈 감지 — 진단 전용 ============
     def _update_zone(self, all_points):
+        """★ 이 판정은 **제어에 쓰이지 않는다.**
+
+        ROI/클러스터 필터를 안 거친 원본 점을 전방 부채꼴에서 세기 때문에
+        벽·기둥·사람이면 무엇이든 문턱을 넘는다. 실제로 콘이 없는 곳에서
+        참이 돼 제어권이 넘어간 적이 있다(2026-08-19 2차 실차). 지금은
+        driver_node 가 **카메라 YOLO 콘 개수**로 구간을 판정하고, 이 토픽은
+        카메라 판정과 얼마나 어긋나는지 보려는 진단 로그로만 남는다.
+        """
         if not all_points:
             sector_count = 0
         else:
-            xs = np.array([p[0] for p in all_points])
-            ys = np.array([p[1] for p in all_points])
+            xs = np.array([q[0] for q in all_points])
+            ys = np.array([q[1] for q in all_points])
             dist = np.hypot(xs, ys)
             ang = np.arctan2(ys, xs)
             sector = (dist >= self.zone_near_m) & (dist <= self.zone_far_m) & \
                      (np.abs(ang) <= self.zone_half_angle_rad)
             sector_count = int(np.sum(sector))
 
-        dense = sector_count >= self.zone_point_threshold
-        if dense:
+        if sector_count >= self.zone_point_threshold:
             self.dense_count += 1
             self.sparse_count = 0
         else:
@@ -392,14 +461,12 @@ class RubberconeNode(Node):
 
         if not self.zone_active and self.dense_count >= self.zone_enter_frames:
             self.zone_active = True
-            self.get_logger().info('CONE_ZONE entered')
+            self.get_logger().info('CONE_ZONE entered (diagnostic only)')
         elif self.zone_active and self.sparse_count >= self.zone_exit_frames:
             self.zone_active = False
-            self.get_logger().info('CONE_ZONE exited')
+            self.get_logger().info('CONE_ZONE exited (diagnostic only)')
 
-        flag = Bool()
-        flag.data = self.zone_active
-        self.zone_pub.publish(flag)
+        self.zone_pub.publish(Bool(data=self.zone_active))
 
     # ==================== 메인 콜백 ====================
     def scan_callback(self, msg: LaserScan):
@@ -407,79 +474,88 @@ class RubberconeNode(Node):
         roi_points = self._apply_roi(all_points)
         cones = self._cluster_and_filter(roi_points)
 
-        tx, ty, left, right = self._find_pair_target(cones)
+        mode = self.get_parameter('pairing_mode').value
+        if mode == 'nearest_pair':
+            path, left, right, source = self._find_pair_target(cones)
+        else:
+            path, left, right, source = self._plan_path(cones)
 
-        if ty is not None:
-            # 목표점 급변 방지: 프레임당 최대 이동량 clamp + 약한 스무딩
+        target = None
+        eff_ld = 0.0
+        clamped = False
+        if path:
+            target, eff_ld, clamped = geo.target_at_lookahead(
+                path, self.lookahead_dist, self.axle_offset)
+
+        if target is not None:
+            tx, ty = target
+            # 목표점 급변 방지: 약한 스무딩 + 프레임당 최대 이동량 clamp.
+            #
+            # ★ 순서가 바뀌었다 (2026-08-22). 예전에는 clamp 를 **먼저** 걸고
+            #   EMA 를 나중에 걸었는데, 그러면 실제 상한이 표기값의 (1-a)배가
+            #   된다:
+            #       ty        <= smoothed + step
+            #       smoothed'  = a*smoothed + (1-a)*ty  <= smoothed + (1-a)*step
+            #   a=0.5 에서 max_target_step_m=0.12 는 실제로 0.06 m/frame 이었다.
+            #   10Hz 기준 목표 y 가 초당 0.6m 밖에 못 따라간다. 급커브(R=0.6)에
+            #   들어가면 목표 y 가 Ld^2/2R = 0.60m 튀는데 따라잡는 데 10프레임
+            #   (1.0s) — 그 사이 차는 0.48m 를 직진한다.
+            #   **급커브에서 못 꺾고 안쪽 콘을 치던 원인이 이것이다.**
+            #   EMA 를 먼저 걸고 그 결과를 clamp 하면 파라미터가 표기 그대로
+            #   프레임당 상한이 된다.
             if self.smoothed_y is None:
                 self.smoothed_y = ty
             else:
-                delta = ty - self.smoothed_y
-                if abs(delta) > self.max_target_step_m:
-                    ty = self.smoothed_y + math.copysign(self.max_target_step_m, delta)
                 a = self.target_smoothing_alpha
-                self.smoothed_y = a * self.smoothed_y + (1.0 - a) * ty
+                sm = a * self.smoothed_y + (1.0 - a) * ty
+                delta = sm - self.smoothed_y
+                if abs(delta) > self.max_target_step_m:
+                    sm = self.smoothed_y + math.copysign(self.max_target_step_m, delta)
+                self.smoothed_y = sm
             ty = self.smoothed_y
+            target = (tx, ty)
 
-            angle = self._steer_to_target(tx, ty)
+            angle = geo.steer_pure_pursuit(
+                target, self.axle_offset, self.wheelbase, self.steer_gain,
+                self.lookahead_min, self.angle_limit)
             speed = self.base_speed
-            source = 'pair'
+            self._prev_target = target
+            self._prev_target_age = 0
         else:
             angle = self._gap_follow_angle(msg)
             speed = self.base_speed * self.lost_speed_ratio
             source = 'gap_fallback'
+            self.smoothed_y = None
+            # 직전 목표점은 **바로 버리지 않고 나이만 먹인다** (위 주석 참고).
+            self._prev_target_age += 1
+            if self._prev_target_age > self.prev_target_max_age:
+                self._prev_target = None
 
         if self.invert_steer:
             angle = -angle
         angle = float(np.clip(angle, -self.angle_limit, self.angle_limit))
 
-        # 조향각이 클수록(급조향일수록) 속도를 줄임. angle_limit에서 min_speed_ratio까지
-        # 선형으로 감속하고, 그 아래로는 안 떨어지게 함.
+        # 조향각이 클수록 감속. angle_limit 에서 min_speed_ratio 까지 선형.
         steer_ratio = abs(angle) / self.angle_limit if self.angle_limit > 0 else 0.0
-        speed_factor = max(self.min_speed_ratio, 1.0 - steer_ratio)
-        speed = speed * speed_factor
-        speed = max(speed, self.min_absolute_speed)  # 모터가 멈추지 않는 최소 속도 보장
+        speed = speed * max(self.min_speed_ratio, 1.0 - steer_ratio)
 
-        # 여기서 바로 발행하지 않는다 — 계산 결과만 남기고, 발행은
-        # _publish_timer_cb 가 30Hz 로 한다 (헤더 주석 2번 참고).
-        self._last_angle = angle
-        self._last_speed = float(speed)
-        self._last_scan_time = self.get_clock().now()
+        self.drive_pub.publish(Float32MultiArray(data=[angle, float(speed)]))
+
+        if clamped:
+            # 중심선이 차에서 멀리서 시작해 요청 lookahead 를 못 맞췄다.
+            # 코너 컷이 eff_ld^2/(8R) 로 커지므로 그냥 넘기면 안 된다.
+            self.get_logger().warn(
+                'lookahead clamp: %.2f -> %.2f m (콘이 멀다/적다)'
+                % (self.lookahead_dist, eff_ld),
+                throttle_duration_sec=2.0)
 
         self._update_zone(all_points)
-        self._publish_debug(roi_points, left, right, tx, ty, angle, source)
-
-    # ==================== 30Hz 고정 발행 ====================
-    def _publish_timer_cb(self):
-        """/cone_cmd 를 publish_rate_hz(기본 30) 로 발행한다.
-
-        스캔이 최근에 왔으면 그 계산값을 그대로 다시 쏜다 — 스캔 사이의
-        빈 간격을 메우는 것이 목적이다. 스캔 자체가 scan_stale_timeout_sec
-        넘게 안 왔으면 라이다/시리얼이 죽은 것이므로, 죽은 라이다 기준의
-        옛 값을 계속 내보내지 않고 정지값(0,0)을 낸다. 그래야 driver_node 가
-        '명령이 계속 온다'고 착각해 죽은 라이다로 콘 사이를 달리지 않는다.
-        """
-        now = self.get_clock().now()
-        stale = (
-            self._last_scan_time is None
-            or (now - self._last_scan_time).nanoseconds / 1e9
-            > self.scan_stale_timeout_sec
-        )
-        if stale:
-            angle, speed = 0.0, 0.0
-            if self._last_scan_time is not None:
-                self.get_logger().error(
-                    '/scan 이 끊겼다 — cone_cmd 를 정지값으로 발행 '
-                    '(라이다/시리얼 점검)', throttle_duration_sec=1.0)
-        else:
-            angle, speed = self._last_angle, self._last_speed
-
-        motor_msg = Float32MultiArray()
-        motor_msg.data = [float(angle), float(speed)]
-        self.drive_pub.publish(motor_msg)
+        self._publish_debug(roi_points, left, right, path, target, angle,
+                            source, eff_ld)
 
     # ==================== 디버그 시각화 ====================
-    def _publish_debug(self, roi_points, left, right, tx, ty, angle, source):
+    def _publish_debug(self, roi_points, left, right, path, target, angle,
+                       source, eff_ld):
         size = 500
         scale = 150.0
         origin = (size // 2, size - 30)
@@ -491,27 +567,43 @@ class RubberconeNode(Node):
         def to_px(x, y):
             return int(origin[0] - y * scale), int(origin[1] - x * scale)
 
+        # ROI 경계 (직사각형 + 거리 상한)
+        cv2.circle(img, origin, int(self.range_max * scale), (60, 60, 0), 1)
+
         for (x, y) in roi_points:
             px, py = to_px(x, y)
             if 0 <= px < size and 0 <= py < size:
                 img[py, px] = (90, 90, 90)
 
-        for (x, y) in left:
-            cv2.circle(img, to_px(x, y), 7, (255, 0, 0), -1)   # 파랑 = 왼쪽 콘
-        for (x, y) in right:
-            cv2.circle(img, to_px(x, y), 7, (0, 255, 255), -1)  # 노랑 = 오른쪽 콘
+        def draw_chain(chain, color):
+            for k, (x, y) in enumerate(chain):
+                cv2.circle(img, to_px(x, y), 7, color, -1)
+                if k:
+                    cv2.line(img, to_px(*chain[k - 1]), to_px(x, y), color, 2)
 
-        cv2.circle(img, origin, 6, (0, 255, 0), -1)  # 차량 위치
+        draw_chain(left, (255, 0, 0))     # 파랑 = 좌측 사슬
+        draw_chain(right, (0, 255, 255))  # 노랑 = 우측 사슬
 
-        if tx is not None and ty is not None:
-            cv2.circle(img, to_px(tx, ty), 8, (255, 0, 255), -1)  # 자주 = 목표점
-            cv2.line(img, origin, to_px(tx, ty), (255, 0, 255), 1)
+        for k, (x, y) in enumerate(path):  # 초록 = 중심선
+            cv2.circle(img, to_px(x, y), 3, (0, 200, 0), -1)
+            if k:
+                cv2.line(img, to_px(*path[k - 1]), to_px(x, y), (0, 200, 0), 1)
 
-        text = 'src=%s angle=%.1f zone=%s' % (source, angle, self.zone_active)
-        cv2.putText(img, text, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.circle(img, origin, 6, (0, 255, 0), -1)                    # 라이다
+        cv2.circle(img, to_px(-self.axle_offset, 0.0), 5, (0, 140, 255), -1)  # 뒤축
 
-        out = self.bridge.cv2_to_imgmsg(img, encoding='bgr8')
-        self.debug_pub.publish(out)
+        if target is not None:
+            cv2.circle(img, to_px(*target), 8, (255, 0, 255), -1)      # 목표점
+            cv2.line(img, to_px(-self.axle_offset, 0.0), to_px(*target),
+                     (255, 0, 255), 1)
+
+        cv2.putText(img, 'src=%s angle=%.1f ld=%.2f' % (source, angle, eff_ld),
+                    (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(img, 'cones L%d R%d  zone=%s' % (len(left), len(right),
+                                                     self.zone_active),
+                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+
+        self.debug_pub.publish(self.bridge.cv2_to_imgmsg(img, encoding='bgr8'))
 
 
 def main(args=None):
