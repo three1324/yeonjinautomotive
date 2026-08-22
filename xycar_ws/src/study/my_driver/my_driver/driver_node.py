@@ -205,7 +205,7 @@ class DriverNode(Node):
                 ("cone_zone.enter_min_size_px", 0.0),
                 # ↑ 그 콘이 **충분히 가까워야** 진입한다 (가장 큰 콘 bbox 높이).
                 #   개수만 보면 직선 끝에서 콘 무리가 보이자마자 전환된다.
-                ("cone_zone.exit_n", 6),       # 이 개수 이하로 떨어지면 이탈 후보
+                ("cone_zone.exit_n", 3),       # 이 개수 이하로 떨어지면 이탈 후보
                 ("cone_zone.exit_hold_sec", 1.5),  # 이탈 후보가 이만큼 지속돼야 실제 이탈
                 # rubbercone_node 의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
                 # 그 노드는 /scan 주기(약 10Hz)로 발행하므로 0.5s 면 5프레임 여유.

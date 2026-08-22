@@ -42,14 +42,6 @@ S자 코스에서 성립하지 않는다는 것이 드러났다.
      `min_gap_m` 만 있어서, 한쪽 벽이 비면 반대편 트랙 콘과 짝지어 폭 1.5m
      짜리 중심선이 생길 수 있었다. `max_gap_m` 을 추가했다.
 
-★ [같은 날, 나중에] 위 5)번의 편측 폴백(법선으로 미는 경로)과 FTG 폴백을
-  **둘 다 폐지했다** — 사용자 결정, 조향이 너무 약하게 들어간다는 판단.
-  지금은 양벽 중심선(chain 모드) 하나뿐이고, 그게 안 나오면 직전 조향각을
-  그대로 유지한다(_plan_path / scan_callback 의 [2026-08-22] 주석 참고).
-  geometry.py 의 offset_from_single_wall / resolve_side / corridor_side
-  함수 자체는 지우지 않았다 — nearest_pair 롤백 경로와 synth_check.py 가
-  여전히 쓴다.
-
 ★ 롤백: `pairing_mode: nearest_pair` 로 두면 옛 페어링 경로가 그대로 돈다
   (실차에서 검증됐던 코드다). 재시작 없이 바꿀 수 있다:
       ros2 param set /rubbercone_node pairing_mode nearest_pair
@@ -169,17 +161,26 @@ class RubberconeNode(Node):
         self.declare_parameter('angle_limit', 35.0)   # 기계적 한계
         self.declare_parameter('invert_steer', False)
 
+        # ---- 목표점 안정화 ----
+        # [2026-08-22] target_smoothing_alpha / max_target_step_m 를 없앴다 —
+        # 사용자 결정, 조향이 너무 약하게 들어간다는 판단. 목표점을 다듬지
+        # 않고 그대로 Pure Pursuit 에 준다. 편측/FTG 폴백은 그대로 남는다.
+
         # ---- 속도 ----
         self.declare_parameter('base_speed', 6.0)
         self.declare_parameter('min_speed_ratio', 0.4)
         # ★ 절대 하한 (2026-08-22). 비율만으로는 **모터 데드밴드 아래**로
         #   떨어진다 — 아래 scan_callback 의 clamp 주석 참고.
         self.declare_parameter('min_speed', 5.0)
-        # 중심선이 안 나온 프레임(직전 조향각 유지)의 감속 배율.
-        # [2026-08-22] FTG 폴백을 없애며 이름은 그대로 두고 뜻만 바뀌었다.
         self.declare_parameter('lost_speed_ratio', 0.7)
 
+        # ---- Follow-the-Gap 폴백 ----
+        self.declare_parameter('car_width_m', 0.3)
+        self.declare_parameter('max_steering_angle_rad', 0.4)
+
         # ---- 롤백 스위치 ----
+        # 직전 목표점을 몇 프레임까지 들고 갈지 (10Hz 기준 5 = 0.5s).
+        self.declare_parameter('prev_target_max_age', 5)
         self.declare_parameter('pairing_mode', 'chain')   # chain | nearest_pair
         self.declare_parameter('pair_max_x_diff_m', 0.5)  # nearest_pair 전용
 
@@ -231,7 +232,11 @@ class RubberconeNode(Node):
         self.min_speed = p('min_speed').value
         self.lost_speed_ratio = p('lost_speed_ratio').value
 
+        self.car_width = p('car_width_m').value
+        self.max_steering_angle_rad = p('max_steering_angle_rad').value
+
         self.pair_max_x_diff_m = p('pair_max_x_diff_m').value
+        self.prev_target_max_age = p('prev_target_max_age').value
 
         self.zone_near_m = p('zone_near_m').value
         self.zone_far_m = p('zone_far_m').value
@@ -247,10 +252,18 @@ class RubberconeNode(Node):
         self._scan_frame = 'laser_frame'
 
         self.bridge = CvBridge()
-        # 중심선이 안 나온 프레임에 유지할 직전 조향각(라디안 아님, geo 가
-        # 내는 그대로 — invert/clamp **전** 값). [2026-08-22] 편측/FTG
-        # 폴백을 없애며 그 자리를 대신한다. scan_callback 참고.
-        self._last_angle = 0.0
+        self._prev_target = None
+        self._prev_target_age = 0
+        # 직전 프레임의 목표점. 편측 폴백에서 미는 방향을 시간 연속성으로
+        # 가르는 데 쓴다 (geo.resolve_side). 오도메트리가 없어 프레임 간
+        # 좌표 이동을 보정하지 않지만, 10Hz·저속에서 이동은 0.06m 수준이고
+        # 두 후보는 0.80m 떨어져 있어 판정에는 충분하다.
+        #
+        # ★ 경로를 못 낸 프레임에도 **바로 버리지 않는다.** 버리면 다음
+        #   프레임도 근거가 없어 또 거부하는 **연쇄**가 생긴다(합성검증에서
+        #   경로없음이 15% -> 55% 로 폭증했다). prev_target_max_age 프레임
+        #   까지는 들고 간다 — 그동안 차는 0.3m 남짓 움직이는데 두 후보는
+        #   0.80m 떨어져 있어 여전히 충분히 가른다.
         self.zone_active = False
         self.dense_count = 0
         self.sparse_count = 0
@@ -375,9 +388,23 @@ class RubberconeNode(Node):
             if path:
                 return path, left, right, 'center'
 
-        # [2026-08-22] 편측 폴백(한쪽 벽만 보일 때 법선으로 미는 경로)을
-        # 없앴다 — 사용자 결정. 양벽이 다 안 잡히면 이 함수는 빈 경로를
-        # 낸다. scan_callback 이 그 경우 직전 조향각을 그대로 유지한다.
+        # 한쪽 벽만 — 커브 안쪽 벽은 콘이 원래 성기므로 **정상 경로**다.
+        # 어느 쪽으로 밀지는 수직 판정 + 직전 목표점(시간 연속성)으로 정한다.
+        # y 부호로 정하면 벽이 차에서 방사 방향으로 보이는 프레임에서 반대로
+        # 밀려 목표점이 0.80m — 복도 폭만큼 — 어긋난다 (geo.resolve_side 참고).
+        for chain in (left, right):
+            if len(chain) >= 2:
+                cs, conf = geo.corridor_side(chain)
+                side = geo.resolve_side(chain, self.single_side_offset_m,
+                                        cs, conf, self._prev_target)
+                if side is None:
+                    # 미는 방향의 근거가 없다. 추측하면 복도 폭만큼 반대로
+                    # 간다 — 이 벽은 쓰지 않고 FTG 로 넘긴다.
+                    continue
+                path = geo.offset_from_single_wall(
+                    chain, self.single_side_offset_m, side)
+                if path:
+                    return path, left, right, 'wall'
         return [], left, right, 'none'
 
     # ==================== 옛 페어링 (pairing_mode=nearest_pair) ====================
@@ -402,6 +429,45 @@ class RubberconeNode(Node):
             rx, ry = right[0]
             return [(rx, ry + self.single_side_offset_m)], left, right, 'pair'
         return [], left, right, 'none'
+
+    # ============ Follow-the-Gap 폴백 (콘을 하나도 못 찾았을 때) ============
+    def _gap_follow_angle(self, msg: LaserScan):
+        ranges = np.array(msg.ranges, dtype=np.float32)
+        ranges = np.where(np.isnan(ranges), 0.0, ranges)
+        ranges = np.where(np.isinf(ranges), msg.range_max, ranges)
+        ranges = np.clip(ranges, 0.0, msg.range_max)
+
+        valid_mask = ranges > self.forward_min
+        if not valid_mask.any():
+            return 0.0
+        masked = np.where(valid_mask, ranges, np.inf)
+        closest_idx = int(np.argmin(masked))
+        closest_dist = ranges[closest_idx]
+
+        bubble_angle_rad = math.atan2(self.car_width / 2.0, max(closest_dist, 0.05))
+        bubble_radius_idx = int(bubble_angle_rad / msg.angle_increment)
+        b_start = max(0, closest_idx - bubble_radius_idx)
+        b_end = min(len(ranges) - 1, closest_idx + bubble_radius_idx)
+        processed = ranges.copy()
+        processed[b_start:b_end + 1] = 0.0
+
+        occ = (processed > self.forward_min).astype(np.int8)
+        diff = np.diff(np.concatenate(([0], occ, [0])))
+        gap_starts, gap_ends = np.where(diff == 1)[0], np.where(diff == -1)[0]
+        if len(gap_starts) == 0:
+            return 0.0
+        largest = int(np.argmax(gap_ends - gap_starts))
+        gs, ge = int(gap_starts[largest]), int(gap_ends[largest])
+        if gs >= ge:
+            best_idx = len(ranges) // 2
+        else:
+            seg = ranges[gs:ge]
+            idxs = np.arange(gs, ge)
+            best_idx = int(np.average(idxs, weights=seg)) if seg.sum() > 0 else (gs + ge) // 2
+
+        steering_angle_rad = msg.angle_min + best_idx * msg.angle_increment
+        mapped = -(steering_angle_rad / self.max_steering_angle_rad) * self.angle_limit
+        return float(np.clip(mapped, -self.angle_limit, self.angle_limit))
 
     # ============ 구간 진입/이탈 감지 — 진단 전용 ============
     def _update_zone(self, all_points):
@@ -462,22 +528,23 @@ class RubberconeNode(Node):
 
         if target is not None:
             # [2026-08-22] 목표점 스무딩(EMA + 프레임당 clamp)을 없앴다 —
-            # 사용자 결정. 조향이 너무 약하게 들어간다는 판단이었다. target
-            # 을 다듬지 않고 그대로 Pure Pursuit 에 넣는다 — 응답은 빨라지는
-            # 대신, 콘 검출이 프레임마다 튀면 조향도 그만큼 튄다.
+            # 사용자 결정, 조향이 너무 약하게 들어간다는 판단. target 을
+            # 다듬지 않고 그대로 Pure Pursuit 에 넣는다. 응답은 빨라지는
+            # 대신 콘 검출이 프레임마다 튀면 조향도 그만큼 튄다.
             angle = geo.steer_pure_pursuit(
                 target, self.axle_offset, self.wheelbase, self.steer_gain,
                 self.lookahead_min, self.angle_limit)
-            self._last_angle = angle
             speed = self.base_speed
+            self._prev_target = target
+            self._prev_target_age = 0
         else:
-            # 중심선이 안 나온 프레임 — 직전 조향각을 그대로 유지한다.
-            # [2026-08-22 사용자 결정] 편측 폴백/FTG 폴백을 없애며 그
-            # 자리를 대신한다. self._last_angle 은 invert/clamp **전**
-            # 값이라 아래 공통 처리를 그대로 다시 통과해도 일관된다.
-            angle = self._last_angle
+            angle = self._gap_follow_angle(msg)
             speed = self.base_speed * self.lost_speed_ratio
-            source = 'hold_last_angle'
+            source = 'gap_fallback'
+            # 직전 목표점은 **바로 버리지 않고 나이만 먹인다** (위 주석 참고).
+            self._prev_target_age += 1
+            if self._prev_target_age > self.prev_target_max_age:
+                self._prev_target = None
 
         if self.invert_steer:
             angle = -angle
