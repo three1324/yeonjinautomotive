@@ -60,20 +60,16 @@ S자 코스에서 성립하지 않는다는 것이 드러났다.
                  R=1.0     R=0.8     R=0.6     R=0.5
       Ld 0.75    0.070     0.088     0.117     0.141
       Ld 0.80    0.080     0.100     0.133     0.160
-      Ld 0.85    0.090     0.113     0.151     0.181
-      Ld 1.10    0.151     0.189     0.252     0.303   <- 채택 (2026-08-22)
+      Ld 0.85    0.090     0.113     0.151     0.181   <- 채택 (2026-08-22)
+      Ld 1.10    0.151     0.189     0.252     0.303   (UNDER_VOLTAGE 완화용, 트림 수정 후 되돌림)
   하한은 축거의 2배(0.67m) — 그 아래는 Pure Pursuit 이 진동한다.
 
-  ★ [사용자 결정 2026-08-22] 0.85 -> 1.10. 위 표대로 **급커브에서는 코너
-    컷이 여유(0.20m)를 넘는다.** 그럼에도 올린 이유는 조향 첨두를 낮춰
-    VESC fault 2(UNDER_VOLTAGE)를 피하려는 것이다 — delta 가 ld 에 거의
-    반비례하므로 0.85->1.10 은 조향을 약 23% 줄인다. 콘을 스치면 다시
-    내리는 것이 아니라, angle_limit 이나 base_speed 쪽으로 옮겨 잡을 것.
-
-  [2026-08-22 실차] 급커브에서 못 꺾고 안쪽 콘을 쳐서 0.85 -> 0.80 으로
-  줄여봤으나, **0.85 고정으로 되돌렸다(사용자 결정).** 짧게 볼수록 직선
-  응답이 나빠지고, 같은 건에서 고친 목표점 clamp 순서 버그(scan_callback
-  의 ★ 주석) 쪽 영향이 훨씬 컸기 때문이다.
+  [2026-08-22] 0.85 -> 1.10(UNDER_VOLTAGE 완화) -> **0.85 로 되돌림**.
+  1.10 이 낮추던 조향 첨두 전류 문제는 서보 중립점 트림을 물리적으로
+  고치면서 해소됐다. 그 전 이력: 급커브에서 못 꺾고 안쪽 콘을 쳐서
+  0.85 -> 0.80 으로 줄여봤으나, 짧게 볼수록 직선 응답이 나빠지고 같은
+  건에서 고친 목표점 clamp 순서 버그(scan_callback 의 ★ 주석) 쪽 영향이
+  훨씬 커서 0.85 로 되돌렸었다.
   곡률 적응 lookahead 는 **쓰지 않는다** — Ld 는 어떤 경우에도 코드가
   바꾸지 않는 고정값이다. 커브에서 남는 오차는 다른 수로 잡는다.
 
@@ -155,12 +151,12 @@ class RubberconeNode(Node):
         # ---- Pure Pursuit ----
         self.declare_parameter('wheelbase_m', 0.333)
         self.declare_parameter('lidar_to_rear_axle_m', 0.41)
-        self.declare_parameter('lookahead_dist_m', 1.10)
+        self.declare_parameter('lookahead_dist_m', 0.85)
         self.declare_parameter('lookahead_min_m', 0.3)
         # rad -> degree 변환 상수 그 자체다 (임의의 튜닝값이 아니다).
         # xycar_motor 의 angle 명령이 실제 조향각(도)과 1:1 임이 실측됐다.
         self.declare_parameter('steer_gain', 57.29578)
-        self.declare_parameter('angle_limit', 32.0)   # [2026-08-22] 35.0 -> 32.0. 근거는 drive_params.yaml
+        self.declare_parameter('angle_limit', 35.0)   # 기계적 한계
         self.declare_parameter('invert_steer', False)
 
         # ---- 목표점 안정화 ----
