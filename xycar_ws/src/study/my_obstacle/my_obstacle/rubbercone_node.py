@@ -180,7 +180,7 @@ class RubberconeNode(Node):
         #     ros2 param set /rubbercone_node steer_trim_deg -2.0
         # 부호가 헷갈리면: 이 값은 최종 명령에 **그대로 더해진다** — 양수를
         # 넣으면 차가 더 왼쪽으로, 음수를 넣으면 더 오른쪽으로 튼다.
-        self.declare_parameter('steer_trim_deg', 0.0)
+        self.declare_parameter('steer_trim_deg', -4.0)   # [2026-08-22] 근거는 drive_params.yaml
 
         # ---- 목표점 안정화 ----
         self.declare_parameter('target_smoothing_alpha', 0.5)
