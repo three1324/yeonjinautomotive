@@ -169,8 +169,8 @@ class DriverNode(Node):
                 ("fsm.shortcut_turn_sec", 1.0),
                 ("fsm.shortcut_confirm_frames", 3),
                 # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
-                # 부호: control.py 규약상 양수=우조향이므로 좌회전은 음수.
-                ("shortcut.turn_angle", -35.0),
+                # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
+                ("shortcut.turn_angle", 35.0),
                 ("shortcut.turn_speed", 10.0),
                 ("fsm.enable_red_stop", True),
                 ("fsm.red_confirm_frames", 3),
@@ -341,6 +341,15 @@ class DriverNode(Node):
             self.get_logger().warn(
                 "주행 대기중. 시작하려면: "
                 "ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: true}'"
+            )
+        else:
+            # require_enable 을 껐다 = launch 만으로 주행 준비가 끝난다.
+            # 그래도 바로 튀어나가지는 않는다 — WAIT_LIGHT 가 신호를 기다린다.
+            # 세우고 싶으면 아래 명령으로 언제든 끌 수 있음을 알려둔다.
+            self.get_logger().warn(
+                "require_enable=false — /drive_enable 없이 바로 주행 준비. "
+                "신호 대기 후 자동 출발한다. 세우려면: "
+                "ros2 topic pub --once /drive_enable std_msgs/msg/Bool '{data: false}'"
             )
         self.get_logger().info(f"driver_node 시작 ({hz:.0f}Hz)")
 
@@ -580,8 +589,14 @@ class DriverNode(Node):
         닿기도 전에 끝난다. 대신 steering.sync() 로 내부 상태를 맞춰서,
         차선주행으로 돌아가는 순간 각도가 튀지 않게 한다.
         """
-        angle = float(self.shortcut_turn_angle)
-        speed = self.speed_limiter.update(dt, self.shortcut_turn_speed)
+        # 매 tick 다시 읽는다. 이 둘은 **실차에서 화면 보며 맞춰야 하는 값**이라
+        # 재시작 없이 바꿀 수 있어야 한다:
+        #     ros2 param set /driver_node shortcut.turn_angle 28.0
+        #     ros2 param set /driver_node shortcut.turn_speed 8.0
+        # (use_lidar 를 매 tick 읽는 것과 같은 이유 — 그 주석 참고)
+        angle = float(self.get_parameter("shortcut.turn_angle").value)
+        turn_speed = float(self.get_parameter("shortcut.turn_speed").value)
+        speed = self.speed_limiter.update(dt, turn_speed)
         self.steering.sync(angle)
 
         if self._last_source != "shortcut":
