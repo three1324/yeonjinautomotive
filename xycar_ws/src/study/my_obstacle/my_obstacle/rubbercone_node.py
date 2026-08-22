@@ -154,13 +154,13 @@ class RubberconeNode(Node):
         self.declare_parameter('wheelbase_m', 0.333)
         self.declare_parameter('lidar_to_rear_axle_m', 0.41)
         # Pure Pursuit 기준점이 라이다에서 **뒤로** 얼마나 떨어져 있는가.
-        # [사용자 결정 2026-08-22] 0.41(뒤축) -> 0.24(차량 중앙).
-        #   라이다 0.0  ·  차량 중앙 0.24 (= 0.41 - 축거/2)  ·  뒤축 0.41
+        # [사용자 결정 2026-08-22] 0.41(뒤축) -> 0.24(차량 중앙) -> **0.14**.
+        #   라이다 0.0  ·  0.14(현재)  ·  차량 중앙 0.24  ·  뒤축 0.41
         # 기준이 앞으로 오면 같은 목표점에 대해 alpha 가 커져 조향이 세진다.
         # ⚠️ 교과서 Pure Pursuit 의 유도는 기준점이 뒤축일 때만 성립한다.
         #    앞으로 당기는 것은 게인을 올린 것과 같다(모듈 docstring 1) 이
         #    경고하는 과조향 방향). 지그재그가 나면 0.41 로 되돌릴 것.
-        self.declare_parameter('pursuit_ref_offset_m', 0.24)
+        self.declare_parameter('pursuit_ref_offset_m', 0.14)
         self.declare_parameter('lookahead_dist_m', 0.85)
         self.declare_parameter('lookahead_min_m', 0.3)
         # rad -> degree 변환 상수 그 자체다 (임의의 튜닝값이 아니다).

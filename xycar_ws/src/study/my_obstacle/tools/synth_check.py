@@ -58,7 +58,7 @@ SIDE_HALF = 2.50        # [2026-08-22] 1.00 -> 2.50 (= RANGE_MAX, 사실상 무�
 RANGE_MAX = 2.50        # [2026-08-22] 1.40 -> 2.50. 근거는 drive_params.yaml
 FORWARD_MIN = 0.15
 LOOKAHEAD = 0.85        # rubbercone_node 기본값과 동일
-PURSUIT_REF = 0.24      # Pure Pursuit 기준점 = 차량 중앙 (pursuit_ref_offset_m)
+PURSUIT_REF = 0.14      # Pure Pursuit 기준점 (pursuit_ref_offset_m). 차량 중앙에서 10cm 앞
 WHEELBASE = 0.333
 GAIN = 57.29578
 ANGLE_LIMIT = 35.0
