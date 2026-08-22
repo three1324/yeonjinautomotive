@@ -162,25 +162,6 @@ class RubberconeNode(Node):
         self.declare_parameter('steer_gain', 57.29578)
         self.declare_parameter('angle_limit', 32.0)   # [2026-08-22] 35.0 -> 32.0. 근거는 drive_params.yaml
         self.declare_parameter('invert_steer', False)
-        # 조향 중립점(하드웨어 트림) 보정. **양수 = 왼쪽으로 미는 상수를 더한다.**
-        # [2026-08-22] 실차 증상: 왼쪽 회전은 정상인데 오른쪽 회전이 늦고
-        # 각도가 부족하며, 직진 중에도 차가 왼쪽으로 쏠린다 — 세 증상이
-        # "angle=0 명령에서 이미 바퀴가 왼쪽으로 살짝 틀어져 있다"는 하나의
-        # 원인(서보 중립점 트림)으로 설명된다. Pure Pursuit 계산 자체는
-        # 좌우 대칭이다(steer_pure_pursuit 의 클램프도 ±angle_limit로 대칭,
-        # 사슬 배정도 y 부호가 아니라 거리/접선 기반) — 검토로 확인했다.
-        #
-        # ★ 근본 해결은 물리 트림이다(서보 혼 재장착 또는 VESC
-        #   steering_angle_to_servo_offset 조정). 이 값은 그때까지의 임시
-        #   보정이다. 물리 트림을 고치면 이 값은 다시 0.0 으로 돌릴 것.
-        #
-        # 찾는 법: 라바콘 구간에서 **직선 복도**를 저속으로 태우며 좌/우
-        # 어느 쪽으로 쏠리는지 본다. 왼쪽으로 쏠리면 음수 방향으로 조금씩
-        # 내린다(예: -2.0). 재시작 없이 바로 시험할 수 있다:
-        #     ros2 param set /rubbercone_node steer_trim_deg -2.0
-        # 부호가 헷갈리면: 이 값은 최종 명령에 **그대로 더해진다** — 양수를
-        # 넣으면 차가 더 왼쪽으로, 음수를 넣으면 더 오른쪽으로 튼다.
-        self.declare_parameter('steer_trim_deg', -4.0)   # [2026-08-22] 근거는 drive_params.yaml
 
         # ---- 목표점 안정화 ----
         self.declare_parameter('target_smoothing_alpha', 0.5)
@@ -246,7 +227,6 @@ class RubberconeNode(Node):
         self.steer_gain = p('steer_gain').value
         self.angle_limit = p('angle_limit').value
         self.invert_steer = p('invert_steer').value
-        self.steer_trim_deg = p('steer_trim_deg').value
 
         self.target_smoothing_alpha = p('target_smoothing_alpha').value
         self.max_target_step_m = p('max_target_step_m').value
@@ -597,10 +577,6 @@ class RubberconeNode(Node):
 
         if self.invert_steer:
             angle = -angle
-        # 하드웨어 트림 보정. invert 뒤, 클램프 전에 더한다 — 최종 명령
-        # 각도 공간에서의 오프셋이라야 "angle=0 인데 왼쪽으로 쏠린다"를
-        # 바로 상쇄한다.
-        angle += self.steer_trim_deg
         angle = float(np.clip(angle, -self.angle_limit, self.angle_limit))
 
         # 조향각이 클수록 감속. angle_limit 에서 min_speed_ratio 까지 선형.
