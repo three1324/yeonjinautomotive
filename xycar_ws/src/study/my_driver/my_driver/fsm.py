@@ -43,15 +43,41 @@ class State(Enum):
 
 
 class ShortcutPhase(Enum):
-    """SHORTCUT 안의 서브위상. 두 걸음뿐이다.
+    """SHORTCUT 안의 서브위상. 세 걸음이다.
 
-    SHIFT  : 진입 직후 shortcut_shift_sec 동안 **왼쪽으로 shortcut_shift_px**
-             목표를 옮긴다(회피 기동과 같은 방식). 1차선으로 붙어서 좌측
-             노란 픽셀이 화면에 잘 들어오게 하는 것이 목적이다.
-    FOLLOW : 목표 오프셋을 0 으로 되돌리고, SHORTCUT 이 끝날 때까지
-             좌측밴드 노란선을 계속 따라간다.
+    ARM_WAIT : LEFT 화살표가 **사라질 때까지** 대기. 그동안은 평소대로
+               일반 차선 추정으로 주행한다(좌측밴드도 오프셋도 안 쓴다).
+               신호가 끊기는 순간이 곧 "신호등을 지나쳤다"는 위치 사건이다.
+    SHIFT    : 거기서부터 shortcut_shift_sec 동안 **왼쪽으로
+               shortcut_shift_px** 목표를 옮긴다(회피 기동과 같은 방식).
+               1차선으로 붙어서 좌측 노란 픽셀이 화면에 잘 들어오게 한다.
+    FOLLOW   : 목표 오프셋을 0 으로 되돌리고, SHORTCUT 이 끝날 때까지
+               좌측밴드 노란선을 계속 따라간다.
 
-    **두 위상 모두 좌측밴드 노란선(offset_*_left)을 횡방향 기준으로 쓴다.**
+    ────────────────────────────────────────────────────────────────
+    왜 ARM_WAIT 를 다시 뒀나 (2026-08-23, 사용자 결정)
+
+    신호등 본체는 먼 거리에서도 안정적으로 잡힌다. 즉 **LEFT 확정 시점이
+    신호등에서 몇 m 앞인지가 매번 다르다**(속도·조명·각도에 따라). 그
+    흔들리는 지점에서 곧바로 왼쪽으로 붙기 시작하면 진입 위치가 재현되지
+    않는다. 반면 LEFT 가 사라지는 순간은 신호등이 화면 위로 벗어났다는
+    뜻 = **차가 신호등에 거의 다다랐다는 위치 사건**이고 속도와 무관하다.
+
+    ⚠️ 소실 감지에는 구조적 지연이 있다:
+           실제로 화면에서 벗어남
+             + light.miss_tolerance      LightVoter 가 NONE 을 내기까지
+             + shortcut_lost_frames      여기서 소실을 확정하기까지
+       더 빨리 반응시키려면 **light.miss_tolerance 를 줄여야** 한다
+       (그쪽이 지배적이다). 단 그 값은 빨간불 정지 등 다른 판정에도 영향을
+       준다.
+
+    ⚠️ LEFT 가 끝내 안 사라지는 경우(신호등 앞에 섰거나 화살표가 계속
+       보이는 각도)를 위해 shortcut_arm_timeout_sec 안전장치를 둔다.
+       여기 갇히면 좌회전을 영영 못 한다.
+    ────────────────────────────────────────────────────────────────
+
+    **SHIFT/FOLLOW 두 위상이 좌측밴드 노란선(offset_*_left)을 횡방향
+    기준으로 쓴다** (ARM_WAIT 는 평소 추정 그대로다).
     분기점에서는 dashed 마스크에 직진 가지와 좌회전 가지가 같이 들어오는데,
     전부 평균내면 그 사이를 겨냥해 어느 쪽도 못 탄다. 행별로 가장 왼쪽
     픽셀에서 lane.left_band_px 안쪽만 남기면 좌회전 가지가 선택되고,
@@ -66,15 +92,17 @@ class ShortcutPhase(Enum):
     회전 반경이 통째로 어긋났고 되돌릴 방법이 없었다.
 
     지금은 좌회전 차선 자체를 인지로 따라간다. 그래서:
-      - LEFT 소실을 기다릴 필요가 없다 (위치 사건으로 쓰던 것) -> 확정 즉시 진입
       - turn_angle / turn_sec / arm_sec 같은 개루프 상수가 필요 없다
       - 끝은 **총 시간**으로만 끊는다 (shortcut_total_sec)
+      - ARM_GO(고정 시간 직진)와 TURN_IN(고정 조향)은 사라졌다.
+        ARM_WAIT 만 남았고, 그 뒤는 곧바로 SHIFT -> FOLLOW 다.
 
     ⚠️ 대신 좌회전 구간에서 노란선을 못 보면 갈 곳이 없다. 그때는
        driver_node 가 평소 차선 추정으로 폴백한다(lane_valid_left=False).
     ────────────────────────────────────────────────────────────────
     """
 
+    ARM_WAIT = "ARM_WAIT"
     SHIFT = "SHIFT"
     FOLLOW = "FOLLOW"
 
@@ -90,6 +118,7 @@ class DriveFSM:
     def __init__(self, start_confirm_frames=5, enable_shortcut=False,
                  auto_start=False, shortcut_total_sec=15.0,
                  shortcut_shift_sec=1.5, shortcut_confirm_frames=3,
+                 shortcut_lost_frames=3, shortcut_arm_timeout_sec=5.0,
                  start_on_green=True, start_on_left=False):
         self.start_confirm_frames = start_confirm_frames
         # ── 어떤 신호에서 출발할지 (2026-08-22) ──
@@ -113,10 +142,16 @@ class DriveFSM:
         self.shortcut_shift_sec = shortcut_shift_sec
         # 좌회전 화살표가 몇 프레임 연속 확정돼야 진입할지.
         self.shortcut_confirm_frames = shortcut_confirm_frames
+        # LEFT 가 아닌 프레임이 몇 번 연속이어야 "사라졌다"로 볼지 (ARM_WAIT).
+        self.shortcut_lost_frames = shortcut_lost_frames
+        # LEFT 가 끝내 안 사라질 때의 안전장치. 이만큼 지나면 사라진 것으로
+        # 치고 SHIFT 로 넘어간다 — 여기 갇히면 좌회전을 영영 못 한다.
+        self.shortcut_arm_timeout_sec = shortcut_arm_timeout_sec
 
         self.state = State.LANE_DRIVE if auto_start else State.WAIT_LIGHT
         self._green_count = 0
         self._left_count = 0
+        self._left_gone_count = 0
         self._shortcut_t = 0.0
         self._phase = None
         self._reason = "init"
@@ -130,6 +165,7 @@ class DriveFSM:
         self.state = State.LANE_DRIVE if self.auto_start else State.WAIT_LIGHT
         self._green_count = 0
         self._left_count = 0
+        self._left_gone_count = 0
         self._shortcut_t = 0.0
         self._phase = None
         self._reason = "reset"
@@ -163,34 +199,58 @@ class DriveFSM:
             if self.enable_shortcut and light_state == LIGHT_LEFT:
                 self._left_count += 1
                 if self._left_count >= self.shortcut_confirm_frames:
-                    # LEFT 소실을 기다리지 않는다 — 확정 즉시 진입한다.
-                    # 예전에는 "신호등을 지났다"는 위치 사건이 필요했지만,
-                    # 지금은 좌회전 차선을 인지로 따라가므로 그 기준점이
-                    # 필요 없다. 오히려 일찍 1차선으로 붙어야 좌측 노란
-                    # 픽셀이 화면에 잘 들어온다.
+                    # 확정만으로는 아직 안 꺾는다. **신호등을 지나칠 때까지**
+                    # (= LEFT 가 사라질 때까지) 평소대로 달린다. 그 사이는
+                    # ARM_WAIT 이고 좌측밴드도 오프셋도 안 쓴다.
                     self.state = State.SHORTCUT
-                    self._phase = ShortcutPhase.SHIFT
+                    self._phase = ShortcutPhase.ARM_WAIT
+                    self._left_gone_count = 0
                     self._shortcut_t = 0.0
-                    self._reason = f"left arrow x{self._left_count}"
+                    self._reason = f"left arrow x{self._left_count} -> arm wait"
             else:
                 self._left_count = 0
 
         elif self.state is State.SHORTCUT:
-            # **신호가 사라져도 끝내지 않는다. 총 시간으로만 끊는다.**
-            # 꺾기 시작하면 신호등이 곧 시야에서 벗어나(지나쳐 버리거나 각도가
-            # 틀어져) LIGHT_LEFT 가 금방 NONE 이 된다. 신호 유지로 끊으면
-            # 진입 도중에 차선주행으로 돌아가 분기를 놓친다.
             self._shortcut_t += dt
-            if (self._phase is ShortcutPhase.SHIFT
-                    and self._shortcut_t >= self.shortcut_shift_sec):
-                self._phase = ShortcutPhase.FOLLOW
-                self._reason = (f"shift done ({self.shortcut_shift_sec:.1f}s) "
-                                f"-> follow left band")
-            if self._shortcut_t >= self.shortcut_total_sec:
-                self.state = State.LANE_DRIVE
-                self._phase = None
-                self._left_count = 0
-                self._reason = f"shortcut done ({self.shortcut_total_sec:.0f}s)"
+
+            if self._phase is ShortcutPhase.ARM_WAIT:
+                # LEFT 가 사라지기를 기다린다 = 신호등을 지났다는 위치 사건.
+                if light_state == LIGHT_LEFT:
+                    self._left_gone_count = 0
+                else:
+                    self._left_gone_count += 1
+                if self._left_gone_count >= self.shortcut_lost_frames:
+                    self._phase = ShortcutPhase.SHIFT
+                    self._shortcut_t = 0.0      # 총 시간은 여기서부터 센다
+                    self._reason = (f"left lost x{self._left_gone_count}"
+                                    f" -> shift")
+                elif self._shortcut_t >= self.shortcut_arm_timeout_sec:
+                    # 안전장치. 신호등 앞에 섰거나 화살표가 계속 보이는
+                    # 각도다. 사라진 것으로 치고 진행한다.
+                    self._phase = ShortcutPhase.SHIFT
+                    self._shortcut_t = 0.0
+                    self._reason = (f"arm timeout "
+                                    f"({self.shortcut_arm_timeout_sec:.0f}s)"
+                                    f" -> shift")
+
+            else:
+                # SHIFT / FOLLOW — **신호가 사라져도 끝내지 않는다.
+                # 총 시간으로만 끊는다.** 꺾기 시작하면 신호등이 곧 시야를
+                # 벗어나 LIGHT_LEFT 가 NONE 이 되는데, 신호 유지로 끊으면
+                # 진입 도중에 차선주행으로 돌아가 분기를 놓친다.
+                if (self._phase is ShortcutPhase.SHIFT
+                        and self._shortcut_t >= self.shortcut_shift_sec):
+                    self._phase = ShortcutPhase.FOLLOW
+                    self._reason = (
+                        f"shift done ({self.shortcut_shift_sec:.1f}s) "
+                        f"-> follow left band")
+                if self._shortcut_t >= self.shortcut_total_sec:
+                    self.state = State.LANE_DRIVE
+                    self._phase = None
+                    self._left_count = 0
+                    self._left_gone_count = 0
+                    self._reason = (f"shortcut done "
+                                    f"({self.shortcut_total_sec:.0f}s)")
 
         return self.state
 

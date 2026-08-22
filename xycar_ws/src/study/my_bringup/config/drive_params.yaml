@@ -606,7 +606,7 @@ driver_node:
       #      대회 직전에 반드시 확인할 것.
 
       shortcut_total_sec: 15.0
-      # ↑ [사용자 결정 2026-08-22] SHORTCUT 을 이만큼 유지하고, 끝나면
+      # ↑ [사용자 결정 2026-08-22] **SHIFT 시작부터** 이만큼 유지하고, 끝나면
       #   기본주행(LANE_DRIVE)으로 돌아온다.
       #   **신호가 사라져도 이 시간으로만 끊는다.** 꺾기 시작하면 신호등이
       #   곧 시야를 벗어나 LIGHT_LEFT 가 NONE 이 되는데, 신호 유지로 끊으면
@@ -618,8 +618,25 @@ driver_node:
       # ↑ 그중 앞부분 — 목표를 왼쪽으로 shortcut.shift_px 만큼 옮겨 1차선으로
       #   붙는 시간. 목적은 회피가 아니라 **시야**다: 트랙 중앙에 있으면
       #   좌회전 차선의 노란선이 화면 왼쪽 끝에 걸리거나 아예 안 잡힌다.
-      #   (옛 shortcut_arm_sec / shortcut_arm_timeout_sec / shortcut_lost_frames /
-      #    shortcut_turn_sec 는 전부 없어졌다 — 개루프 상수였다.)
+      #   (옛 shortcut_arm_sec / shortcut_turn_sec 는 없어졌다 — 개루프 상수였다.)
+
+      # ── ARM_WAIT: 신호등을 지나칠 때까지 대기 (2026-08-23 부활) ──
+      # LEFT 확정만으로는 안 꾫는다. 화살표가 **사라지는 순간**부터 SHIFT 로
+      # 들어간다 — 그게 곳 "신호등을 지나쳤다"는 위치 사건이기 때문이다.
+      # 확정 시점은 거리가 매번 달라 재현이 안 된다. 그 사이(ARM_WAIT)는
+      # 평소대로 일반 추정으로 달린다 — 좌측밴드도 오프셋도 안 쓴다.
+      # 총 시간(shortcut_total_sec)도 SHIFT 부터 센다.
+      shortcut_lost_frames: 3
+      # ↑ LEFT 가 아닌 프레임이 이만큼 연속이어야 "사라졌다"로 본다.
+      #   ⚠️ 소실 감지에는 구조적 지연이 있다:
+      #      light.miss_tolerance (LightVoter 가 NONE 을 내기까지)
+      #      + 이 값 (여기서 소실을 확정하기까지)
+      #      더 빨리 반응시키려면 **light.miss_tolerance 를 줄여야** 한다
+      #      (그쪽이 지배적이다). 단 그 값은 빨간불 정지 판정에도 영향을 준다.
+      shortcut_arm_timeout_sec: 5.0
+      # ↑ 안전장치. LEFT 가 끝내 안 사라지면(신호등 앞에 섬 / 화살표가
+      #   계속 보이는 각도) 이만큼 지난 뒤 사라진 것으로 치고 SHIFT 로 간다.
+      #   여기 갇히면 좌회전을 영영 못 한다.
       shortcut_confirm_frames: 3
       # ↑ [사용자 결정 2026-08-22] 5 -> 3. 좌회전 신호를 **더 잘 읽도록** 낮췄다.
       #   light.min_weight_left / min_ratio_left 와 같은 취지다(그쪽 주석 참고).

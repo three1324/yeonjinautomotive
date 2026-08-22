@@ -185,6 +185,8 @@ class DriverNode(Node):
                 ("fsm.shortcut_total_sec", 15.0),
                 ("fsm.shortcut_shift_sec", 1.5),
                 ("fsm.shortcut_confirm_frames", 5),
+                ("fsm.shortcut_lost_frames", 3),
+                ("fsm.shortcut_arm_timeout_sec", 5.0),
                 # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
                 # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
                 ("shortcut.shift_px", 70.0),
@@ -254,6 +256,8 @@ class DriverNode(Node):
             shortcut_total_sec=g("fsm.shortcut_total_sec").value,
             shortcut_shift_sec=g("fsm.shortcut_shift_sec").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
+            shortcut_lost_frames=g("fsm.shortcut_lost_frames").value,
+            shortcut_arm_timeout_sec=g("fsm.shortcut_arm_timeout_sec").value,
             auto_start=g("fsm.auto_start").value,
         )
         self.cone_zone = ConeZoneDetector(
@@ -547,7 +551,13 @@ class DriverNode(Node):
         #
         # 좌측밴드가 무효면(노란선을 아예 못 봄, 또는 옛 perception_node)
         # 평소 추정으로 폴백한다 — 갈 곳이 없는 것보다 낫다.
-        use_left_band = (state is State.SHORTCUT and self.obs.lane_valid_left)
+        # 좌측밴드는 SHIFT/FOLLOW 에서만 쓴다.
+        # ARM_WAIT (신호등을 지나치기 전) 는 평소 추정 그대로다 —
+        # 아직 분기점이 아니라 노란선이 하나뿐이고, 좌측밴드를 쓰면
+        # 이득 없이 왼쪽으로 편향만 생긴다.
+        use_left_band = (state is State.SHORTCUT
+                         and self.fsm.shortcut_phase is not ShortcutPhase.ARM_WAIT
+                         and self.obs.lane_valid_left)
         if use_left_band:
             ref = LaneRef(self.obs.offset_near_left, self.obs.offset_far_left,
                           True, self.obs.quality)
