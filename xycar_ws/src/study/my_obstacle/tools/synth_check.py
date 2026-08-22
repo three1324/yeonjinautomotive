@@ -57,7 +57,7 @@ TANGENT_COS = 0.50      # centerline 방향 검사 (같은 벽 짝짓기 차단)
 SIDE_HALF = 2.50        # [2026-08-22] 1.00 -> 2.50 (= RANGE_MAX, 사실상 무효)
 RANGE_MAX = 2.50        # [2026-08-22] 1.40 -> 2.50. 근거는 drive_params.yaml
 FORWARD_MIN = 0.15
-LOOKAHEAD = 1.10        # rubbercone_node 기본값과 동일
+LOOKAHEAD = 0.90        # rubbercone_node 기본값과 동일
 WHEELBASE = 0.333
 GAIN = 57.29578
 ANGLE_LIMIT = 35.0
