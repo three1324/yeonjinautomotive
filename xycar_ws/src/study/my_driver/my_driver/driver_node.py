@@ -199,7 +199,7 @@ class DriverNode(Node):
                 ("lateral.shift_scale", 0.5),
                 ("lateral.overshoot_sec", 0.5),
                 ("lateral.overshoot_scale", 1.0),
-                ("lateral.trigger_height_px", 67.0),
+                ("lateral.trigger_height_px", 60.0),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
