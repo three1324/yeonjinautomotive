@@ -91,7 +91,7 @@ class RubberconeNode(Node):
 
         # ---- Pure Pursuit 조향 ----
         self.declare_parameter('wheelbase_m', 0.26)   # 실측 필요
-        self.declare_parameter('lookahead_min_m', 0.3)
+        self.declare_parameter('lookahead_m', 0.7)
         # 라이다 -> 뒷축 거리(m). Pure Pursuit 는 **뒷축 기준** 식이다.
         self.declare_parameter('lidar_to_rear_axle_m', 0.30)
         self.declare_parameter('steer_gain', 120.0)   # rad -> angle 스케일 (시뮬레이션 값, 실차 재튜닝 필요)
@@ -146,7 +146,7 @@ class RubberconeNode(Node):
         self.single_side_offset_m = p('single_side_offset_m').value
 
         self.wheelbase = p('wheelbase_m').value
-        self.lookahead_min = p('lookahead_min_m').value
+        self.lookahead = p('lookahead_m').value
         self.lidar_to_rear_axle = p('lidar_to_rear_axle_m').value
         self.steer_gain = p('steer_gain').value
         self.angle_limit = p('angle_limit').value
@@ -325,7 +325,12 @@ class RubberconeNode(Node):
         dist = math.hypot(tx, ty)
         if dist < 1e-3:
             return 0.0
-        ld = max(dist, self.lookahead_min)
+        # **고정 lookahead** (2026-08-22 사용자 결정).
+        # 이전: ld = max(dist, lookahead_min) -> 목표점까지의 거리를 그대로 썼다.
+        #       그러면 게이트가 멀수록 분모가 커져 반응이 약해지고, 가까울수록
+        #       급격히 세진다. 같은 횡오차인데 거리에 따라 조향이 크게 달라진다.
+        # 지금: ld 를 상수로 둔다. 거리와 무관하게 "이만큼 앞을 보고 돈다".
+        ld = self.lookahead
         delta_rad = math.atan2(2.0 * self.wheelbase * (ty / dist), ld)
         angle = delta_rad * self.steer_gain
         return float(np.clip(angle, -self.angle_limit, self.angle_limit))
