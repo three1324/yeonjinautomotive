@@ -103,13 +103,7 @@ def extract(result, names, width, height, dashed_conf, solid_conf,
                 det.cone_near_y = max(det.cone_near_y, y2)
                 det.cone_max_h = max(det.cone_max_h, y2 - y1)
         elif cls in CAR_NAMES:
-            # 여러 대가 보이면 **가장 가까운 한 대**만 남긴다 (2026-08-21).
-            # 이전에는 conf 가 가장 높은 차를 골랐는데, conf 는 거리와 상관이
-            # 없다 — 멀리 있는 차가 또렷하게 찍히면 그쪽이 뽑혀서, 바로 앞의
-            # 차를 두고 먼 차 기준으로 회피 방향을 정하는 일이 생긴다.
-            # bbox 하단 y 는 거리의 단조 함수라(모듈 docstring) 가장 큰 y2 가
-            # 가장 가까운 차다.
-            if conf >= car_conf and (not det.car_present or y2 > det.car_bottom_y):
+            if conf >= car_conf and conf > det.car_conf:
                 det.car_present = True
                 det.car_cx = (x1 + x2) / 2.0
                 det.car_bottom_y = y2

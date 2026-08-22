@@ -581,12 +581,18 @@ ros2 param set /rubbercone_node cluster_max_span_m 0.35
 
 지금 전부 **가정값**이라 실측이 필요한 것들:
 
+**[2026-08-22 갱신]** 아래 rubbercone 값들은 **실측 치수로 확정**됐다
+(콘 지름 10cm / 콘 간격 43.4cm / 복도 폭 80cm / 라이다-뒤축 41cm).
+근거와 검산은 `my_obstacle/my_obstacle/geometry.py` docstring 참고.
+실차 bag 이 없어 합성 검증으로 대신했다: `python3 my_obstacle/tools/synth_check.py`
+
 | 파라미터 | 지금 값 | 무엇으로 정하나 |
 |---|---|---|
-| `rubbercone.cluster_max_span_m` | 0.4 | 콘 하나의 실측 폭. 이보다 크면 벽으로 버린다 |
-| `rubbercone.min_gap_m` | 0.5 | 실측 콘 복도 폭 |
-| `rubbercone.forward_max` | 2.5 | 라이다가 콘을 실제로 잡는 거리 |
-| `rubbercone.lookahead_min_m` | 0.3 | 실차에서 코너를 깎지 않는 최소값 |
+| `rubbercone.cluster_max_span_m` | 0.20 | ✅ 콘 하나 span 0.10m 의 2배로 확정 |
+| `rubbercone.min_gap_m` / `max_gap_m` | 0.60 / 1.00 | ✅ 복도 폭 0.80m ±25% 로 확정 |
+| `rubbercone.range_max_m` | 1.40 | ⚠️ 라이다가 콘을 **실제로** 잡는 거리로 재확인 필요 |
+| `rubbercone.lookahead_dist_m` | 0.85 | ⚠️ 코너를 깎으면 낮출 것(0.75), 조향이 떨리면 올릴 것 |
+| `rubbercone.lidar_to_rear_axle_m` | 0.41 | ✅ 팀원 실측 base_link 기준값 |
 | `cone_zone.enter_n / exit_n` | 8 / 2 | 콘 구간에서 YOLO 가 실제로 몇 개를 세는지 |
 | `cone_zone.enter_min_size_px` | 90.0 | 구간에 **닿았을 때** 가장 큰 콘 bbox 높이. 화각·해상도 종속이라 실차 카메라로 재확인 필요 |
 

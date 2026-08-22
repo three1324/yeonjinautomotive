@@ -37,23 +37,16 @@ class OvertakePhase(Enum):
     SHIFT = "SHIFT"     # 옆으로 벌리는 중
     PASS = "PASS"       # 벌린 상태로 통과 중
     RETURN = "RETURN"   # 트랙 중앙으로 복귀 중
+    OVERSHOOT = "OVERSHOOT"  # 중앙을 지나 반대쪽으로 잠시 더
 
 
 class OvertakeBehavior:
     """방해차량 회피 서브행동. **카메라만 쓴다 (라이다 사용 안 함).**
 
-    규칙이 **두 줄**이다 (2026-08-21 사용자 결정으로 단순화):
-      시작 : 카메라가 차량을 봤다. 그게 전부다 (+ 쿨다운 중이 아닐 것)
-      복귀 : 차량이 안 보이는 상태가 lost_hold_sec(1초) 이어졌다
-
-    이전에는 시작에 거리 조건(bbox 하단 y >= 300px)이, 복귀에 세 가지
-    관측 조건(멀어짐 / 화면 가장자리 / 시간 상한)이 더 있었다. 실차에서
-    거리 조건은 **너무 늦게** 걸렸고(그 시점엔 이미 shift_sec 안에 못 벌린다),
-    복귀 조건들은 **너무 일찍** 걸렸다(관측이 흔들릴 때마다 차 옆을 지나는
-    중에 중앙으로 돌아왔다). 둘 다 같은 신호(차가 보이는가) 하나로 줄였다.
-
-    대가: 트리거의 유일한 문턱이 YOLO 의 car_conf 가 됐다. 차량 오검출이
-    그대로 헛회피가 된다 — 오발동이 잦으면 car_conf 를 올려야 한다.
+    트리거 조건 (모두 만족해야 시작):
+      - 카메라가 차량을 봤다 (라바콘이 아니라 차량이라는 건 YOLO만 안다)
+      - 그 차량이 충분히 가깝다 (bbox 하단 y가 임계 이상)
+      - 쿨다운 중이 아니다
 
     ────────────────────────────────────────────────────────────────
     왜 라이다를 뺐나 (2026-08-19 실차 결정)
@@ -82,18 +75,33 @@ class OvertakeBehavior:
     목표가 따라 흔들리면 조향이 진동하기 때문이다.
     """
 
-    def __init__(self, shift_px,
+    def __init__(self, shift_px, trigger_bottom_y,
                  shift_sec, pass_sec, return_sec,
-                 cooldown_sec=1.0, lost_hold_sec=1.0):
+                 cooldown_sec=1.0, pass_exit_ratio=0.85,
+                 pass_exit_cx_ratio=0.85, lost_hold_sec=1.0, shift_scale=0.5, overshoot_sec=0.5,
+                 overshoot_scale=1.0):
         self.shift_px = shift_px                    # 반폭 미학습 시 폴백값 (픽셀)
+        self.trigger_bottom_y = trigger_bottom_y    # 차량 bbox 하단 y 임계 (클수록 가까움)
+        # 추월 후 중앙을 지나 반대쪽으로 더 머물 시간과 그 크기 배율.
+        # 0 으로 두면 예전처럼 중앙에서 바로 끝난다.
+        self.overshoot_sec = overshoot_sec
+        self.overshoot_scale = overshoot_scale
+        # 회피량 배율. 반폭/2 로는 과하게 벌어져 30% 줄였다 (_shift_amount 참고).
+        self.shift_scale = shift_scale
         self.shift_sec = shift_sec
+        self.pass_sec = pass_sec                    # PASS 유지의 **상한** (안전장치)
         self.return_sec = return_sec
         self.cooldown_sec = cooldown_sec            # 복귀 후 재발동 금지 시간
-        # PASS 유지의 상한. **0 이면 상한 없음**(사용자 결정 2026-08-21).
-        # 0 으로 두면 차가 계속 보이는 한 계속 벌린 채로 달린다 — 앞차를 따라
-        # 가는 상황에서는 그게 맞다. 다만 주차된 차나 트랙 밖 차가 시야에
-        # 계속 걸리면 한쪽으로 붙은 채 트랙을 도는 위험이 남는다.
-        self.pass_sec = pass_sec
+        # PASS 탈출용 히스테리시스. bottom_y 가 trigger 의 이 배율 아래로 내려가면
+        # "지나쳤다"고 본다. 1.0 으로 두면 임계 근처에서 진입/이탈이 떨린다.
+        self.pass_exit_ratio = pass_exit_ratio
+        # 차량이 화면 가장자리로 밀려나면 옆으로 지나친 것이다.
+        # |cx - 중심| / (폭/2) 가 이 값을 넘으면 통과로 본다.
+        # [실측 2026-08-19] 테스트영상 f2741~2811 구간에서 cx 가 440->612 로
+        # 이동하는 동안 bottom_y 는 계속 커져(302->439) "멀어짐" 조건이 걸리지
+        # 않았고, pass_sec 상한(1.5s)으로만 복귀했다. 옆을 스쳐 지나가는 차는
+        # 가까워지면서 화면 밖으로 나가므로 bottom_y 만으로는 못 잡는다.
+        self.pass_exit_cx_ratio = pass_exit_cx_ratio
         # 차량이 **안 보이는 상태가 이만큼 이어져야** 복귀한다 (2026-08-21).
         # 한 프레임만 놓쳐도 복귀하면, 옆으로 벌린 순간 방해차량이 화면 밖으로
         # 잠깐 나가거나 YOLO 가 한 프레임 놓치는 것만으로 기동이 중단된다.
@@ -103,6 +111,13 @@ class OvertakeBehavior:
         self.phase = OvertakePhase.IDLE
         self._t = 0.0
         self._dir = 0        # +1: 오른쪽으로 피함, -1: 왼쪽으로 피함
+        # 기동을 시작할 때 **방해차량이 어느 쪽에 있다고 봤는지**.
+        # -1 = 화면 왼쪽, +1 = 오른쪽, 0 = 기동 중 아님. 항상 _dir 의 반대다.
+        # _dir 로부터 유도할 수는 있지만, 시각화에서 "피하는 방향"과 "차가
+        # 있던 방향"을 나란히 보여줘야 부호를 오해하지 않는다 — 실제로
+        # 8/21 에 그 혼동으로 차가 방해차량 쪽으로 붙는 버그가 있었다.
+        self._car_side = 0
+        self._car_cx = 0.0   # 판단 근거가 된 x중심(픽셀). 진단·시각화용
         self._amount = 0.0   # 이번 기동의 회피량(픽셀). 시작 시 고정된다
         self._cooldown = 0.0
         self._lost_t = 0.0      # 차량을 연속으로 못 본 시간 (PASS 중에만 의미)
@@ -112,6 +127,8 @@ class OvertakeBehavior:
         self.phase = OvertakePhase.IDLE
         self._t = 0.0
         self._dir = 0
+        self._car_side = 0
+        self._car_cx = 0.0
         self._amount = 0.0
         self._lost_t = 0.0
 
@@ -128,6 +145,19 @@ class OvertakeBehavior:
     def direction(self):
         """+1 오른쪽 / -1 왼쪽 / 0 없음. 진단·시각화용."""
         return self._dir
+
+    @property
+    def car_side(self):
+        """기동 시작 시 방해차량이 있다고 판단한 쪽. -1 왼쪽 / +1 오른쪽 / 0 없음.
+
+        진단·시각화 전용 — 제어에는 쓰지 않는다(_dir 이 이미 그 결과다).
+        """
+        return self._car_side
+
+    @property
+    def car_cx(self):
+        """그 판단의 근거가 된 차량 x중심(픽셀). 시작 시점에 고정된다."""
+        return self._car_cx
 
     def _pick_side(self, car_cx, image_width):
         """차량 반대쪽으로 피한다. 카메라의 차량 x중심만 본다.
@@ -162,16 +192,36 @@ class OvertakeBehavior:
         """
         return -self._dir * self._amount * ratio
 
+    def _overshoot(self):
+        """복귀 방향으로 중앙을 지나친 목표 오프셋(픽셀).
+
+        부호가 _offset() 과 **반대**다. 회피했던 쪽의 반대쪽이므로
+        방해차량이 서 있던 차선 쪽이다 — 이미 지나친 뒤에만 쓴다.
+        크기는 회피량 x overshoot_scale.
+        """
+        return -self._dir * self._amount * self.overshoot_scale
+
+    def _finish(self):
+        """기동 종료 + 쿨다운 시작. RETURN/OVERSHOOT 둘 다 여기로 끝난다."""
+        self.reset()
+        # 복귀 직후 같은 차가 아직 앞에 있으면 즉시 재발동해 지그재그가 된다.
+        # 쿨다운 동안은 트리거를 막는다.
+        self._cooldown = self.cooldown_sec
+        self.last_reason = f"done (cooldown {self.cooldown_sec:.1f}s)"
+
     def _shift_amount(self, half_near):
         """이번 기동에서 옆으로 옮길 양(픽셀).
 
         트랙 반쪽의 중앙 = 트랙중앙에서 반폭/2 만큼. 반폭을 아직 학습하지
         못했으면(0) 고정값으로 폴백한다 — 근거는 약하지만 아예 못 피하는 것보다는
         낫다는 판단(사용자 결정). 대신 폴백인지 아닌지를 last_reason 에 남긴다.
+
+        마지막에 shift_scale 을 곱한다. 반폭/2 는 실차에서 너무 크게 벌어졌다
+        — 8/21 에 0.7(30% 감소), 8/22 에 0.5(절반)까지 줄였다. **폴백 경로에도
+        같이 곱해야** 두 경로의 크기 감각이 어긋나지 않는다.
         """
-        if half_near > 0.0:
-            return half_near / 2.0
-        return self.shift_px
+        base = half_near / 2.0 if half_near > 0.0 else self.shift_px
+        return base * self.shift_scale
 
     def update(self, dt, car_present, car_cx, car_bottom_y,
                image_width, half_near=0.0):
@@ -184,20 +234,18 @@ class OvertakeBehavior:
                 self._cooldown = max(0.0, self._cooldown - dt)
                 return 0.0
 
-            # **보이면 바로 시작한다** (사용자 결정 2026-08-21).
-            # 이전에는 bbox 하단 y >= 300px(가까움) 을 함께 요구했는데, 그때는
-            # 이미 늦어서 shift_sec(0.8s) 안에 못 벌리고 앞차에 닿았다.
-            # 이제 거리 조건이 없으므로 트리거는 YOLO 의 car_conf 게이트가
-            # 유일한 문턱이다 — 오검출이 곧 헛회피가 된다.
-            if car_present:
+            if car_present and car_bottom_y >= self.trigger_bottom_y:
                 d = self._pick_side(car_cx, image_width)
                 self._dir = d
+                self._car_side = -d      # 피하는 쪽의 반대 = 차가 있던 쪽
+                self._car_cx = float(car_cx)
                 self._amount = self._shift_amount(half_near)
                 self.phase = OvertakePhase.SHIFT
                 self._t = 0.0
                 src = "half/2" if half_near > 0.0 else "shift_px(fallback)"
                 self.last_reason = (
-                    f"start {'right' if d > 0 else 'left'} "
+                    f"start: car {'left' if d > 0 else 'right'}"
+                    f"(cx{car_cx:.0f}) -> avoid {'right' if d > 0 else 'left'} "
                     f"{self._amount:.0f}px[{src}]")
             return 0.0
 
@@ -221,21 +269,21 @@ class OvertakeBehavior:
             else:
                 self._lost_t += dt
 
-            # 복귀 조건은 **"차가 안 보이고 1초"** 하나뿐이다
-            # (사용자 결정 2026-08-21). 이전에 있던 "멀어짐(bottom_y 감소)",
-            # "화면 가장자리로 밀려남(cx)" 은 지웠다 — 관측이 흔들릴 때마다
-            # 회피가 중간에 끊겨 차 옆을 지나는 중에 중앙으로 돌아왔다.
-            # 트리거(보이면 시작)와 복귀(안 보이면 종료)가 같은 신호의 앞뒤라
-            # 규칙이 하나로 단순해진다.
             reason = None
-            if not car_present:
-                if self._lost_t >= self.lost_hold_sec:
-                    reason = f"car gone({self._lost_t:.1f}s)"
-                else:
-                    # 아직 유지시간 중 — 벌린 상태를 그대로 유지한다.
-                    return self._offset()
-            elif self.pass_sec > 0.0 and self._t >= self.pass_sec:
-                # 상한을 켜 뒀을 때만. 기본은 0(상한 없음) — 생성자 주석 참고.
+            if not car_present and self._lost_t >= self.lost_hold_sec:
+                reason = f"car gone({self._lost_t:.1f}s)"
+            elif not car_present:
+                # 아직 유지시간 중 — 벌린 상태를 그대로 유지한다.
+                return self._offset()
+            elif car_bottom_y < self.trigger_bottom_y * self.pass_exit_ratio:
+                reason = f"car receding(y{car_bottom_y:.0f})"
+            elif (image_width > 0
+                  and abs(car_cx - image_width / 2.0) / (image_width / 2.0)
+                  > self.pass_exit_cx_ratio):
+                reason = f"car at edge(cx{car_cx:.0f})"
+            elif self._t >= self.pass_sec:
+                # 위 셋 다 아닌데 시간이 다 됐다 = 관측이 계속 "앞에 있다"고 말하는
+                # 상황이다. 무한정 벌린 채로 달릴 수는 없으니 상한으로 끊는다.
                 reason = f"pass timeout({self.pass_sec:.1f}s)"
 
             if reason is not None:
@@ -247,13 +295,26 @@ class OvertakeBehavior:
         if self.phase is OvertakePhase.RETURN:
             ratio = min(self._t / max(self.return_sec, 1e-3), 1.0)
             if ratio >= 1.0:
-                self.reset()
-                # 복귀 직후 같은 차가 아직 앞에 있으면 즉시 재발동해 지그재그가 된다.
-                # 쿨다운 동안은 트리거를 막는다.
-                self._cooldown = self.cooldown_sec
-                self.last_reason = f"done (cooldown {self.cooldown_sec:.1f}s)"
+                if self.overshoot_sec > 0.0:
+                    # 중앙에서 멈추지 않고 **반대쪽으로 더 넘어간다.**
+                    self.phase = OvertakePhase.OVERSHOOT
+                    self._t = 0.0
+                    self.last_reason = (
+                        f"overshoot {self._overshoot():+.0f}px "
+                        f"{self.overshoot_sec:.1f}s")
+                    return self._overshoot()
+                self._finish()
                 return 0.0
             return self._offset(1.0 - ratio)
+
+        if self.phase is OvertakePhase.OVERSHOOT:
+            # 복귀 방향으로 0.5초 더 꾸족 넘어간 뒤 차선 제어에 맡긴다.
+            # 오프셋을 계단으로 떨구고 끝내는 것이 맞다 — 여기서 다시 0 으로
+            # 램프를 내리면 반대쪽으로 갔다가 돌아오는 지그재그가 한 번 더 생긴다.
+            if self._t >= self.overshoot_sec:
+                self._finish()
+                return 0.0
+            return self._overshoot()
 
         return 0.0
 
@@ -261,63 +322,9 @@ class OvertakeBehavior:
 class LateralPlanner:
     """횡방향 목표 오프셋을 최종 결정한다."""
 
-    def __init__(self, overtake: OvertakeBehavior, enable_overtake=True,
-                 shortcut_half_car_px=45.0, shortcut_margin_px=0.0):
+    def __init__(self, overtake: OvertakeBehavior, enable_overtake=True):
         self.overtake = overtake
         self.enable_overtake = enable_overtake
-        # 좌회전(지름길) 구간에서 좌측 실선으로부터 안쪽으로 띄울 양(픽셀).
-        # **반차폭**이다 — 차량 왼쪽면이 실선에 닿는 위치를 목표로 삼는다.
-        self.shortcut_half_car_px = shortcut_half_car_px
-        # 실선에서 **추가로** 더 띄울 안전여유(픽셀).
-        # [2026-08-21] 반차폭만 쓰면 설계상 여유가 정확히 0 이다 — 차량 왼쪽면이
-        # 실선에 딱 붙는다. shortcut_half_car_px 를 실제보다 조금만 작게 잡아도
-        # 차량 왼쪽면이 실선을 **넘어간다**(실차에서 "왼쪽으로 나간다"고 보인 것이
-        # 이것이다). 인지 오차·차체 롤까지 있으니 여유를 명시적으로 둔다.
-        self.shortcut_margin_px = shortcut_margin_px
-
-    def shortcut_target(self, half_near):
-        """좌회전 구간 목표 오프셋 — 가장 좌측 흰 실선을 따라간다.
-
-        ────────────────────────────────────────────────────────────
-        유도
-
-        offset 규약은 `트랙중앙 - 차량중심`(lane.py) 이고, 제어기는 정상상태에서
-        offset_near 를 target_offset 으로 만든다. 즉
-
-            target = 트랙중앙 - 차량중심   ->   차량중심 = 트랙중앙 - target
-
-        좌측 실선은 트랙중앙에서 반폭(half_near)만큼 왼쪽이다:
-
-            좌측실선 = 트랙중앙 - half_near
-
-        목표는 **차량 왼쪽면이 그 실선에 붙는 것**이므로 차량중심은 실선에서
-        반차폭만큼 오른쪽이다:
-
-            차량중심 = 좌측실선 + 반차폭 = 트랙중앙 - half_near + 반차폭
-
-        두 식을 맞추면:
-
-            target = half_near - 반차폭 - 여유
-
-        검산: 반차폭·여유 0 이면 target = half_near -> 차량중심이 실선 위. 맞다.
-
-        **부호 확인 (2026-08-21 재검증)**: target 이 **클수록** 차는 왼쪽이다
-        (차량중심 = 트랙중앙 - target). 반차폭을 빼면 target 이 작아지므로
-        차는 실선에서 **오른쪽(안쪽)** 으로 온다. 의도대로다.
-        실차에서 왼쪽으로 나갔다면 부호가 아니라 **반차폭 값이 작은 것**이다 —
-        그러면 차량중심은 맞아도 차체 왼쪽면이 실선 밖으로 나간다.
-        ────────────────────────────────────────────────────────────
-
-        half_near 가 0 이면(좌우 흰선을 아직 동시에 본 적이 없어 반폭 미학습)
-        실선 위치를 모른다. 그때는 **트랙 중앙을 유지**한다 — 근거 없이 왼쪽으로
-        밀면 코스를 이탈한다. 로그에 남으니 자주 뜨면 인지 쪽을 봐야 한다.
-        """
-        if half_near <= 0.0:
-            return 0.0
-        # 여유를 빼도 트랙 중앙을 넘어 오른쪽으로 가지는 않게 막는다.
-        # (반차폭+여유가 반폭보다 크면 target 이 음수가 되어 오른쪽으로 간다)
-        return max(0.0, half_near - self.shortcut_half_car_px
-                   - self.shortcut_margin_px)
 
     def blend_waypoint(self, target_offset, waypoint_offset, weight):
         """3단계 확장 지점 — 레이싱 라인 반영.
@@ -329,24 +336,25 @@ class LateralPlanner:
             return target_offset
         return (1.0 - weight) * target_offset + weight * waypoint_offset
 
-    def update(self, dt, obs, image_width, shortcut=False):
+    def update(self, dt, obs, image_width, allow_overtake=True):
         """obs: driver_node 가 모아 넘기는 관측 묶음. 목표 오프셋(픽셀) 반환.
 
-        shortcut: 좌회전(지름길) 구간인가. True 면 트랙 중앙 대신 좌측 실선
-                  안쪽을 기준으로 삼는다.
+        allow_overtake: False 면 이번 tick 은 회피를 하지 않는다. 좌회전 직후
+            차단 구간에서 driver_node 가 내린다 (그 파라미터 주석 참고).
+            **차단 중에는 overtake 를 reset 한다** — 좌회전 TURN_IN 동안 이
+            경로가 아예 안 불렸으므로, 그 전에 기동 중이던 상태가 그대로
+            남아 있을 수 있다. 그걸 들고 복귀하면 엉뚱하게 벌린 채 달린다.
+
+        좌회전(지름길)은 여기서 다루지 않는다. 진입 전(ARM)은 **평소 주행과
+        완전히 같고**, 꺾는 동안(TURN_IN)은 driver_node 가 이 경로를 아예
+        거치지 않고 고정 조향을 낸다.
         """
         half_near = getattr(obs, "half_near", 0.0)
-
-        if shortcut:
-            # 좌회전 구간에서는 회피를 하지 않는다. 이미 트랙 왼쪽 끝에 붙어
-            # 달리는 중이라 더 옆으로 벌릴 여유가 없고, 12초 안에 구간을
-            # 빠져나가는 것이 우선이다.
-            self.overtake.reset()
-            return self.shortcut_target(half_near)
-
         target = 0.0   # 기본은 트랙 중앙
 
-        if self.enable_overtake:
+        if not allow_overtake:
+            self.overtake.reset()
+        elif self.enable_overtake:
             # 카메라 관측만 넘긴다. obs 에는 라이다 값(front_dist 등)도 들어 있지만
             # 회피는 그걸 쓰지 않는다 (OvertakeBehavior 주석 참고).
             target += self.overtake.update(

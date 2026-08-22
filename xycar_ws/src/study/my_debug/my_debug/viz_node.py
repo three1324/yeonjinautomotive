@@ -34,7 +34,7 @@ import math
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped, TransformStamped
+from geometry_msgs.msg import Point, PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry, Path
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -51,6 +51,9 @@ from visualization_msgs.msg import Marker, MarkerArray
 # 튜닝 중 판단이 빨라진다.
 _LANE_COLOR = (1.0, 1.0, 0.2)      # 노랑 — 카메라 차선 (driver_node)
 _CONE_COLOR = (1.0, 0.2, 0.2)      # 빨강 — 라이다 (rubbercone_node)
+_OT_COLOR = (1.0, 0.55, 0.0)       # 주황 — 회피(추월) 기동 중
+
+_DIR_NAME = {1: "RIGHT", -1: "LEFT", 0: "-"}
 
 
 def _yaw_to_quat(yaw):
@@ -312,7 +315,14 @@ class VizNode(Node):
         s = self._state
         # 지금 무엇을 따르고 있는지를 **색**으로 먼저 보여준다.
         # 노랑=카메라 차선, 빨강=라바콘 구간(rubbercone_node).
-        r, g, b = (_CONE_COLOR if (s or {}).get("cone_zone") else _LANE_COLOR)
+        # 회피 기동 중이면 그게 지금 목표를 밀고 있는 주체다 — 색이 그걸
+        # 먼저 말해야 한다. 우선순위: 라바콘(라이다) > 회피 > 차선.
+        if (s or {}).get("cone_zone"):
+            r, g, b = _CONE_COLOR
+        elif (s or {}).get("overtake", "-") != "-":
+            r, g, b = _OT_COLOR
+        else:
+            r, g, b = _LANE_COLOR
         text.color.r, text.color.g, text.color.b = r, g, b
         if s is None:
             text.text = "waiting /debug_state ..."
@@ -324,9 +334,11 @@ class VizNode(Node):
                 f"{'OK' if s.get('valid') else 'HOLD'}\n"
                 f"light={s.get('light', '?')} "
                 f"cone={s.get('cone_n', 0)}\n"
-                + (f"AVOID {'RIGHT' if s.get('ot_dir', 0) > 0 else 'LEFT'} "
+                + (f"OVERTAKE [{s.get('overtake')}]  "
+                   f"car {_DIR_NAME.get(s.get('ot_car_side', 0), '?')}"
+                   f" -> AVOID {_DIR_NAME.get(s.get('ot_dir', 0), '?')} "
                    f"{s.get('ot_amount', 0):.0f}px "
-                   f"(half={s.get('half_near', 0):.0f}) "
+                   f"(half={s.get('half_near', 0):.0f})\n"
                    f"{s.get('ot_reason', '')}\n"
                    if s.get('overtake', '-') != '-' else "")
                 +
@@ -348,6 +360,55 @@ class VizNode(Node):
         body.color.b = 1.0
         body.color.a = 0.4
         arr.markers.append(body)
+
+        # 3) 회피(추월) 기동 — 공간 화면에서는 **방향 그 자체**를 그린다.
+        #    top-down 이라 +y 가 왼쪽이므로, 화살표가 가리키는 쪽이 곧 판단이다.
+        #    ot_dir: +1 오른쪽으로 피함(-y),  ot_car_side: -1 차가 왼쪽(+y).
+        #    둘을 같이 그려야 "차가 왼쪽인데 왜 왼쪽으로 피하지" 같은 부호
+        #    오류가 화면에서 바로 보인다 (2026-08-21 에 실제로 있었던 버그다).
+        active = bool(s) and s.get("overtake", "-") != "-"
+        adir = (s or {}).get("ot_dir", 0)
+        side = (s or {}).get("ot_car_side", 0)
+
+        arrow = self._marker(now, "overtake", 10, Marker.ARROW)
+        if active and adir != 0:
+            arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.04, 0.08, 0.08
+            start, end = Point(), Point()
+            start.x, start.y, start.z = self.wheelbase * 0.5, 0.0, 0.30
+            # ot_dir +1 = 오른쪽 = -y
+            end.x, end.y, end.z = self.wheelbase * 0.5, -0.5 * adir, 0.30
+            arrow.points = [start, end]
+            arrow.color.r, arrow.color.g, arrow.color.b = _OT_COLOR
+        else:
+            arrow.action = Marker.DELETE
+        arr.markers.append(arrow)
+
+        # 방해차량이 있다고 판단한 쪽에 표식 하나. 화살표와 **반대쪽**에
+        # 떠야 정상이다 — 같은 쪽에 뜨면 부호가 뒤집힌 것이다.
+        car = self._marker(now, "overtake", 11, Marker.CUBE)
+        if active and side != 0:
+            car.scale.x, car.scale.y, car.scale.z = 0.30, 0.20, 0.20
+            car.pose.position.x = self.wheelbase * 0.5 + 0.7
+            car.pose.position.y = 0.45 * (1 if side < 0 else -1)  # side -1 = 왼쪽(+y)
+            car.pose.position.z = 0.10
+            car.color.r, car.color.g, car.color.b = _OT_COLOR
+            car.color.a = 0.55
+        else:
+            car.action = Marker.DELETE
+        arr.markers.append(car)
+
+        label = self._marker(now, "overtake", 12, Marker.TEXT_VIEW_FACING)
+        if active:
+            label.pose.position.x = self.wheelbase * 0.5
+            label.pose.position.z = 0.45
+            label.scale.z = 0.10
+            label.color.r, label.color.g, label.color.b = _OT_COLOR
+            label.text = (f"OVERTAKE {s.get('overtake')}\n"
+                          f"car {_DIR_NAME.get(side, '?')}"
+                          f" -> avoid {_DIR_NAME.get(adir, '?')}")
+        else:
+            label.action = Marker.DELETE
+        arr.markers.append(label)
 
         self.pub_markers.publish(arr)
 

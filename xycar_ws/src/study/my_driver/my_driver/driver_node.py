@@ -36,9 +36,11 @@
 ────────────────────────────────────────────────────────────────────────
 라바콘 구간은 통째로 넘긴다 (mux)
 
-`rubbercone_node` 는 팀원이 **실차에서 성공시킨 구현**을 그대로 가져온
-것이다(콘 클러스터링 -> 좌우 페어링 -> Pure Pursuit, 실패 시 Follow-the-Gap).
-그 노드가 구간 판정부터 조향·속도까지 스스로 다 만든다.
+`rubbercone_node` 가 조향·속도를 스스로 다 만든다(콘 클러스터링 -> 좌/우 사슬
+-> 중심선 -> 뒤축 기준 Pure Pursuit, 실패 시 Follow-the-Gap).
+원래는 팀원이 실차에서 성공시킨 구현을 그대로 가져온 것이었고, 2026-08-22 에
+실측 치수(콘 간격 43.4cm / 복도 폭 80cm / 라이다-뒤축 41cm)를 넣어 기하를
+개편했다. 옛 경로는 `pairing_mode: nearest_pair` 로 남아 있다.
 
     perception(YOLO cone_n) --> cone_zone.ConeZoneDetector --> mux 판단
     rubbercone_node         --/cone_cmd------------------------> 구간이면 그대로 통과
@@ -58,9 +60,7 @@
 라이다는 이 노드에 **한 경로로만** 들어온다 (2026-08-21 정리)
 
     콘 구간 + rubbercone 살아있음  ->  라이다 주행 (_drive_cone_zone)
-    콘 구간 + rubbercone 죽음      ->  **차선 단독으로 통과 시도** (2026-08-21 변경.
-                                        예전엔 여기서 정지했는데, 콘 구간 한복판에서
-                                        서 버리는 쪽이 실차에서 더 나쁘게 걸렸다)
+    콘 구간 + rubbercone 죽음      ->  **정지**
     콘 구간 아님                    ->  차선 단독. 라이다 값을 읽지도 않는다
 
 이전에는 두 개의 비상 경로가 더 있었다: /corridor(복도 추정)를 차선과
@@ -87,7 +87,7 @@ from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
 from my_driver.control import SpeedLimiter, SteeringController
 from my_driver.cone_zone import ConeZoneDetector
-from my_driver.fsm import DriveFSM, State
+from my_driver.fsm import DriveFSM, ShortcutPhase, State
 from my_driver.lateral import LateralPlanner, OvertakeBehavior
 from my_driver.longitudinal import LongitudinalPlanner
 
@@ -162,18 +162,26 @@ class DriverNode(Node):
                 # FSM
                 ("fsm.start_confirm_frames", 5),
                 ("fsm.enable_shortcut", False),
-                ("fsm.shortcut_sec", 12.0),
+                # 좌회전(지름길) 진입 — LEFT 가 사라지면(= 신호등을 지나면)
+                # arm_sec 만큼 더 평소대로 달린 뒤, turn_sec 동안 고정 조향으로
+                # 꺾고 차선주행으로 돌아온다.
+                ("fsm.shortcut_arm_sec", 0.5),
+                ("fsm.shortcut_turn_sec", 1.0),
+                ("fsm.shortcut_arm_timeout_sec", 5.0),
+                ("fsm.shortcut_lost_frames", 3),
                 ("fsm.shortcut_confirm_frames", 5),
-                ("fsm.enable_red_stop", True),
-                ("fsm.red_confirm_frames", 5),
-                ("fsm.red_release_sec", 3.0),
-                ("lateral.shortcut_half_car_px", 45.0),
-                ("lateral.shortcut_margin_px", 20.0),
+                # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
+                # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
+                ("shortcut.turn_angle", 35.0),
+                ("shortcut.turn_speed", 10.0),
+                # 좌회전을 끝낸 뒤 이만큼은 회피를 하지 않는다. 분기 직후는
+                # 화면이 평소와 달라 YOLO 가 차량을 오검출하기 쉬운데, 그때
+                # 회피가 걸리면 갓 들어온 길에서 옆으로 벌린 채 달린다.
+                ("shortcut.overtake_block_sec", 20.0),
                 ("fsm.auto_start", False),
                 # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
                 # 판정을 라이다에 맡겼더니 콘이 없는 곳(벽·기둥)에서도 구간으로
                 # 잡혀 제어권이 넘어갔다 (2026-08-19 2차 실차). cone_zone.py 참고.
-                ("cone.speed_floor", 4.5),
                 ("cone_zone.enter_n", 8),      # 콘 이 개수 이상 보이면 진입 후보
                 ("cone_zone.enter_min_size_px", 0.0),
                 # ↑ 그 콘이 **충분히 가까워야** 진입한다 (가장 큰 콘 bbox 높이).
@@ -186,10 +194,16 @@ class DriverNode(Node):
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.shift_px", 120.0),
+                ("lateral.shift_scale", 0.5),
+                ("lateral.overshoot_sec", 0.5),
+                ("lateral.overshoot_scale", 1.0),
+                ("lateral.trigger_bottom_y", 300.0),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
                 ("lateral.cooldown_sec", 1.0),
+                ("lateral.pass_exit_ratio", 0.85),
+                ("lateral.pass_exit_cx_ratio", 0.85),
                 ("lateral.lost_hold_sec", 1.0),
                 # 종방향
                 ("speed.base", 12.0),
@@ -206,7 +220,6 @@ class DriverNode(Node):
                 ("speed.cone_n_hi", 8.0),
                 ("speed.cone_factor_min", 0.6),
                 ("speed.overtake_factor", 0.7),
-                ("speed.car_detect_factor", 0.7),
                 ("speed.kick", 7.0),
                 # 조향
                 ("steer.k_lat", 0.10),
@@ -229,11 +242,11 @@ class DriverNode(Node):
         self.fsm = DriveFSM(
             start_confirm_frames=g("fsm.start_confirm_frames").value,
             enable_shortcut=g("fsm.enable_shortcut").value,
-            shortcut_sec=g("fsm.shortcut_sec").value,
+            shortcut_arm_sec=g("fsm.shortcut_arm_sec").value,
+            shortcut_turn_sec=g("fsm.shortcut_turn_sec").value,
+            shortcut_arm_timeout_sec=g("fsm.shortcut_arm_timeout_sec").value,
+            shortcut_lost_frames=g("fsm.shortcut_lost_frames").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
-            enable_red_stop=g("fsm.enable_red_stop").value,
-            red_confirm_frames=g("fsm.red_confirm_frames").value,
-            red_release_sec=g("fsm.red_release_sec").value,
             auto_start=g("fsm.auto_start").value,
         )
         self.cone_zone = ConeZoneDetector(
@@ -246,19 +259,26 @@ class DriverNode(Node):
         self.lateral = LateralPlanner(
             OvertakeBehavior(
                 shift_px=g("lateral.shift_px").value,
+                shift_scale=g("lateral.shift_scale").value,
+                overshoot_sec=g("lateral.overshoot_sec").value,
+                overshoot_scale=g("lateral.overshoot_scale").value,
+                trigger_bottom_y=g("lateral.trigger_bottom_y").value,
                 shift_sec=g("lateral.shift_sec").value,
                 pass_sec=g("lateral.pass_sec").value,
                 return_sec=g("lateral.return_sec").value,
                 cooldown_sec=g("lateral.cooldown_sec").value,
+                pass_exit_ratio=g("lateral.pass_exit_ratio").value,
+                pass_exit_cx_ratio=g("lateral.pass_exit_cx_ratio").value,
                 lost_hold_sec=g("lateral.lost_hold_sec").value,
             ),
             enable_overtake=g("lateral.enable_overtake").value,
-            shortcut_half_car_px=g("lateral.shortcut_half_car_px").value,
-            shortcut_margin_px=g("lateral.shortcut_margin_px").value,
         )
-        # 콘 구간 속도 하한은 별도 파라미터다 (_drive_cone_zone 참고).
-        self.speed_min = g("speed.min").value
-        self.cone_speed_floor = g("cone.speed_floor").value
+        self.shortcut_turn_angle = g("shortcut.turn_angle").value
+        self.shortcut_turn_speed = g("shortcut.turn_speed").value
+        self.shortcut_overtake_block = g("shortcut.overtake_block_sec").value
+        # 남은 회피 차단 시간(초). 좌회전이 끝나는 순간 채워지고 매 tick 준다.
+        self._overtake_block_left = 0.0
+        self._prev_fsm_state = self.fsm.state
         self.longitudinal = LongitudinalPlanner(
             base_speed=g("speed.base").value,
             min_speed=g("speed.min").value,
@@ -271,7 +291,6 @@ class DriverNode(Node):
             cone_n_hi=g("speed.cone_n_hi").value,
             cone_factor_min=g("speed.cone_factor_min").value,
             overtake_factor=g("speed.overtake_factor").value,
-            car_detect_factor=g("speed.car_detect_factor").value,
         )
         self.steering = SteeringController(
             k_lat=g("steer.k_lat").value,
@@ -414,6 +433,12 @@ class DriverNode(Node):
         in_cone_zone = self.cone_zone.update(
             dt, self.obs.cone_n, self.obs.cone_max_h)
 
+        # 회피 차단 시간도 여기서 준다. 아래 조기 return(정지·대기) 뒤에 두면
+        # 서 있는 동안 시간이 안 흘러, 신호 대기 한 번에 차단이 무한정
+        # 늘어난다. 벽시계 20초가 맞다.
+        if self._overtake_block_left > 0.0:
+            self._overtake_block_left = max(0.0, self._overtake_block_left - dt)
+
         if not self._enabled:
             self._publish(0.0, 0.0)
             self._pub_debug(self.fsm.state.value, 0.0, 0.0, "disabled")
@@ -431,22 +456,31 @@ class DriverNode(Node):
             self._pub_debug(self.fsm.state.value, 0.0, 0.0, f"stale({age:.2f}s)")
             return
 
-        # dt 를 넘겨야 SHORTCUT 유지시간(12초)이 흘러간다.
+        # dt 를 넘겨야 SHORTCUT 위상 시간(ARM/TURN_IN)이 흘러간다.
         state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
 
+        # 좌회전을 막 끝냈다 -> 회피 차단 시작.
+        if self._prev_fsm_state is State.SHORTCUT and state is not State.SHORTCUT:
+            self._overtake_block_left = self.shortcut_overtake_block
+            self.get_logger().info(
+                f"좌회전 완료 — 회피 {self.shortcut_overtake_block:.0f}초 차단")
+        self._prev_fsm_state = state
+
+        # ── 좌회전(지름길) 꺾기 ──
+        # **인지를 전혀 보지 않는다.** 아래의 콘 구간 mux 도, 차선 소실 정지도
+        # 건너뛴다. 둘 다 여기서는 해가 된다:
+        #   - 분기 초입에서 차선이 끊기거나 엉뚱하게 잡히는데, 그 정지 판정에
+        #     걸리면 **꺾는 도중에 선다.**
+        #   - 콘 구간 판정이 겹치면 rubbercone_node 가 조향을 가져가 버린다.
+        # ARM 위상은 여기서 안 걸린다 — 평소 차선 주행 그대로 아래로 흘러간다.
+        if self.fsm.shortcut_phase is ShortcutPhase.TURN_IN:
+            self._drive_shortcut_turn(dt, state)
+            return
+
         if not self.fsm.should_drive:
-            # _publish(0,0) 이 아니라 _halt() 다. 둘의 차이가 중요하다.
-            # _publish 는 모터에 0 을 쏘기만 하고 SpeedLimiter 내부 _cmd 는
-            # 직전 값(예: 12)으로 남는다. 출발선 WAIT_LIGHT 는 처음부터 0 이라
-            # 아무도 몰랐지만, **주행 중 빨간불 정지(STOP_RED)** 가 생기면서
-            # 문제가 된다 — 재출발하는 순간 리미터가 "이미 12로 달리는 중"이라
-            # 믿고 12를 그대로 내보내 가속제한이 통째로 건너뛰어진다.
-            # 그건 우리가 8/19 에 고쳤던 fault 2(저전압) 를 다시 부르는 길이다.
-            # _halt() 는 조향·리미터를 함께 0 으로 동기화한다.
-            self._halt()
-            reason = "red" if state is State.STOP_RED else "wait"
-            self._log(state, 0.0, 0.0, reason)
-            self._pub_debug(state.value, 0.0, 0.0, reason)
+            self._publish(0.0, 0.0)
+            self._log(state, 0.0, 0.0, "wait")
+            self._pub_debug(state.value, 0.0, 0.0, "wait")
             return
 
         # ── 구간 판정은 카메라, 주행은 rubbercone_node (2026-08-19 2차 실차) ──
@@ -487,22 +521,24 @@ class DriverNode(Node):
 
         elif in_cone_zone:
             # 콘 구간인데 명령이 안 온다 = rubbercone_node 가 죽었거나 라이다가 끊겼다.
-            # [2026-08-21 제거] 예전에는 여기서 정지했다. 그런데 실차에서는
-            # 콘 구간 한복판에서 서 버리는 쪽이 더 자주/더 나쁘게 걸렸다 —
-            # 차선으로 넘기면 콘을 칠 위험은 있지만, 최소한 차가 멈춰 서서
-            # 미완주로 끝나지는 않는다. 아래 차선 주행으로 그대로 흘려보낸다.
-            self.get_logger().warn(
-                "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 차선만으로 통과 시도 "
-                "(콘 접촉 위험, 라이다/rubbercone_node 점검)",
-                throttle_duration_sec=1.0)
+            # **정지한다.** 차선으로 되돌아가면 콘을 친다 — 우측 콘 벽이 흰 실선보다
+            # 안쪽이라 차선 중심을 따라가는 것 자체가 콘으로 들어가는 길이다.
+            # 콘 사이에서 멈추는 벌점이, 콘을 치거나 코스를 이탈하는 것보다 낫다.
+            self.get_logger().error(
+                "CONE_ZONE 인데 /cone_cmd 가 끊겼다 — 정지 "
+                "(라이다/rubbercone_node 점검)", throttle_duration_sec=1.0)
+            self._halt()
+            self._log(state, 0.0, 0.0, "cone_cmd lost")
+            self._pub_debug(state.value, 0.0, 0.0, "cone_cmd lost")
+            return
 
         if self._last_source != "lane":
             self.get_logger().info(
                 f"CONE_ZONE 이탈 — 차선 주행으로 복귀 ({self.cone_zone.last_reason})")
             self._last_source = "lane"
 
-        # 여기 도달했다 = 콘 구간이 아니거나, 콘 구간이지만 use_lidar 를 껐거나,
-        # 콘 구간인데 /cone_cmd 가 끊겼다. 어느 쪽이든 횡방향 기준은 **차선 단독**이다.
+        # 여기 도달했다 = 콘 구간이 아니거나, 콘 구간이지만 use_lidar 를 껐다.
+        # 어느 쪽이든 횡방향 기준은 **차선 단독**이다.
         # 라이다(복도)를 섞던 fusion 은 제거했다 — 모듈 docstring 참고.
         ref = LaneRef(self.obs.offset_near, self.obs.offset_far,
                       self.obs.lane_valid, self.obs.quality)
@@ -524,15 +560,9 @@ class DriverNode(Node):
                 self._pub_debug(state.value, 0.0, 0.0, "ref lost")
                 return
 
-        # 좌회전 목표는 실차에서 화면 보며 맞추는 값이라 매 tick 다시 읽는다:
-        #     ros2 param set /driver_node lateral.shortcut_half_car_px 90.0
-        #     ros2 param set /driver_node lateral.shortcut_margin_px 30.0
-        self.lateral.shortcut_half_car_px = g("lateral.shortcut_half_car_px").value
-        self.lateral.shortcut_margin_px = g("lateral.shortcut_margin_px").value
-
         target_offset = self.lateral.update(
             dt, self.obs, self.image_width,
-            shortcut=(state is State.SHORTCUT))
+            allow_overtake=(self._overtake_block_left <= 0.0))
         self._target_offset = target_offset
         # lateral 을 먼저 돌려야 이번 tick 의 회피 상태가 정해진다.
         # 종방향은 그 결과(기동 중인지)를 받아 감속한다 — 순서가 중요하다.
@@ -540,7 +570,6 @@ class DriverNode(Node):
             ref.valid, ref.offset_near, ref.offset_far,
             ref.quality, self.obs.cone_n,
             overtake_active=self.lateral.overtake.active,
-            car_ahead=self.obs.car_present,
         )
         speed = self.speed_limiter.update(dt, target_speed)
 
@@ -554,6 +583,36 @@ class DriverNode(Node):
         self._publish(angle, speed)
         self._log(state, angle, speed, self.longitudinal.last_reason)
         self._pub_debug(state.value, angle, speed, self.longitudinal.last_reason)
+
+    def _drive_shortcut_turn(self, dt, state):
+        """좌회전 진입 — 고정 조향각 + 고정 속도. 인지는 안 본다.
+
+        왜 고정값인가: 분기 초입은 차선이 한쪽만 보이거나 아예 끊긴다. 그
+        상태의 offset 을 믿고 제어하면 꺾다 말고 되돌아온다. 정해진 시간 동안
+        정해진 각도로 도는 것이 유일하게 재현 가능한 방법이다.
+
+        **속도도 같이 고정해야** 회전 반경이 재현된다 — 같은 조향각이라도
+        속도가 다르면 반경이 달라진다. 다만 SpeedLimiter 는 통과시킨다.
+        알고리즘이 아니라 하드웨어 보호다(콘 구간과 같은 이유 — 급가속이
+        배터리 전압을 끌어내려 VESC 가 UNDER_VOLTAGE 로 멈춘다).
+
+        조향은 rate limit 도 안 씌운다. 씌우면 1초짜리 기동에서 목표 각도에
+        닿기도 전에 끝난다. 대신 steering.sync() 로 내부 상태를 맞춰서,
+        차선주행으로 돌아가는 순간 각도가 튀지 않게 한다.
+        """
+        angle = float(self.shortcut_turn_angle)
+        speed = self.speed_limiter.update(dt, self.shortcut_turn_speed)
+        self.steering.sync(angle)
+
+        if self._last_source != "shortcut":
+            self.get_logger().info(
+                f"SHORTCUT/TURN_IN — 고정 조향 {angle:+.1f} 로 좌회전 진입 "
+                f"({self.fsm.shortcut_turn_sec:.1f}s)")
+            self._last_source = "shortcut"
+
+        self._publish(angle, speed)
+        self._log(state, angle, speed, "shortcut(turn_in)")
+        self._pub_debug(state.value, angle, speed, "shortcut(turn_in)")
 
     def _drive_cone_zone(self, dt, state):
         """라바콘 구간 — rubbercone_node 명령을 그대로 통과시킨다.
@@ -569,28 +628,6 @@ class DriverNode(Node):
         없으므로 여기서 씌운다.
         """
         angle, cone_speed = self._cone_cmd
-
-        # ── 저속 데드밴드 하한 (2026-08-21 실차: 콘 구간에서 모터가 잠겼다) ──
-        # rubbercone_node 는 조향각에 비례해 감속한다:
-        #     speed = base_speed(6.0) x max(min_speed_ratio(0.4), 1-|angle|/limit)
-        # S자에서 조향이 커지면 speed 2.4 까지 떨어지는데, 이 차량 상수
-        # (gain 4614 x weight 0.08)로는 886 ERPM 이다. 센서리스 BLDC 가
-        # 정류 동기를 못 잡는 1500 ERPM(=speed 4.06) 한참 아래라 **모터가 잠긴다.**
-        # 차선 주행 쪽은 longitudinal 이 v = max(v, min_speed) 로 이미 막고 있는데,
-        # 이 경로는 rubbercone 명령을 그대로 통과시키느라 그 보호가 빠져 있었다.
-        # SpeedLimiter 는 가감속·상한만 걸고 **하한이 없다.**
-        #
-        # 0 은 그대로 둔다 — 그건 "서라"는 뜻이라 눌러 올리면 안 된다.
-        #
-        # [2026-08-21 갱신] 팀원이 같은 문제를 rubbercone_node 안에서 고쳐 왔다
-        # (min_absolute_speed=5.0, base_speed=8.0 — 실차 검증본). 그래서 여기는
-        # **안전망으로만** 남긴다. 하한을 speed.min(7.0) 으로 두면 팀원이 실제로
-        # 달려보고 정한 5.0 을 우리가 덮어써서 검증된 동작이 바뀐다.
-        # cone.speed_floor 는 정류 한계(1500 ERPM = speed 4.06) 바로 위로만 잡아,
-        # rubbercone 이 파라미터 없이 뜨는 경우에만 걸리게 한다.
-        if cone_speed > 0.0:
-            cone_speed = max(cone_speed, self.cone_speed_floor)
-
         speed = self.speed_limiter.update(dt, cone_speed)
 
         # 조향기 내부 상태를 실제 출력에 맞춰둔다. 구간을 빠져나가 우리 제어로
@@ -625,12 +662,12 @@ class DriverNode(Node):
             # 들어가는 상황을 화면에서 바로 구분하려면 같이 보여야 한다.
             "cone_h": round(self.obs.cone_max_h, 0),
             "zone_why": self.cone_zone.last_reason,
-            # 좌회전(지름길) 남은 시간. 0 이면 그 구간이 아니다. 12초를 눈으로
-            # 세지 않아도 되도록 화면에 띄운다.
+            # 좌회전(지름길) 위상과 그 위상의 남은 시간. 위상이 "-" 면 그
+            # 구간이 아니다. ARM(평소 주행)인지 TURN_IN(고정 조향)인지가
+            # 화면에서 바로 구분돼야 "왜 차선을 무시하나"를 오해하지 않는다.
+            "shortcut_phase": (self.fsm.shortcut_phase.value
+                               if self.fsm.shortcut_phase else "-"),
             "shortcut_remain": round(self.fsm.shortcut_remain, 1),
-            # 좌회전 목표가 좌측 실선에서 얼마나 안쪽인지(px). 양수면 안쪽(정상),
-            # 0 이면 차량 왼쪽면이 실선 위, 음수면 실선을 넘는다.
-            "shortcut_inset": round(self.obs.half_near - self._target_offset, 1),
             # 라이다(rubbercone_node)가 몰고 있는 구간인지. 화면에서 바로
             # 구분돼야 "지금 누가 운전 중인가"를 오해하지 않는다.
             "cone_zone": bool(self.cone_zone.active),
@@ -642,8 +679,21 @@ class DriverNode(Node):
             # 회피 기동의 근거를 그대로 노출한다. 화면만 보고 "왜 저쪽으로
             # 피했는가 / 왜 안 피하는가"를 알 수 있어야 튜닝이 가능하다.
             "ot_dir": self.lateral.overtake.direction,
+            # 회피의 **원인**: 방해차량이 어느 쪽에 있다고 봤는가.
+            # ot_dir(피하는 쪽)과 부호가 반대라 둘을 같이 봐야 판단이 옳았는지
+            # 화면에서 가를 수 있다 (8/21 부호 버그가 바로 이 지점이었다).
+            "ot_car_side": self.lateral.overtake.car_side,
+            "ot_car_cx": round(self.lateral.overtake.car_cx, 1),
             "ot_amount": round(self.lateral.overtake.amount, 1),
             "ot_reason": self.lateral.overtake.last_reason,
+            # 지금 이 순간의 차량 관측(기동 여부와 무관). 기동이 안 걸릴 때
+            # "차를 아예 못 본 건지, 봤는데 아직 먼 건지"를 가른다.
+            "car_present": bool(self.obs.car_present),
+            "car_cx": round(float(self.obs.car_cx), 1),
+            "car_bottom_y": round(float(self.obs.car_bottom_y), 1),
+            # 좌회전 직후 회피 차단이 걸려 있는지. 0 이면 평소대로 회피한다.
+            # 이게 안 보이면 "왜 안 피하지"를 화면에서 못 가른다.
+            "ot_block": round(self._overtake_block_left, 1),
             "half_near": round(self.obs.half_near, 1),
             "target_off": round(float(self._target_offset), 1),
             "reason": reason,
@@ -662,7 +712,7 @@ class DriverNode(Node):
             f"off={ref.offset_near:+6.1f}/{ref.offset_far:+6.1f} "
             f"q={ref.quality:.2f} {'OK' if ref.valid else 'HOLD'} | "
             f"light={LIGHT_NAME.get(self.obs.light, '?')}"
-            f"{f' LEFT{self.fsm.shortcut_remain:.0f}s' if self.fsm.shortcut_remain > 0 else ''} "
+            f"{f' LEFT/{self.fsm.shortcut_phase.value}{self.fsm.shortcut_remain:.1f}s' if self.fsm.shortcut_phase else ''} "
             f"cone={self.obs.cone_n}{'[ZONE]' if self.cone_zone.active else ''} "
             f"ov={ov} | {reason}"
         )
