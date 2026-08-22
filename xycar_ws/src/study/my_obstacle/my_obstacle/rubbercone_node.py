@@ -60,13 +60,13 @@ S자 코스에서 성립하지 않는다는 것이 드러났다.
                  R=1.0     R=0.8     R=0.6     R=0.5
       Ld 0.75    0.070     0.088     0.117     0.141
       Ld 0.80    0.080     0.100     0.133     0.160
-      Ld 0.85    0.090     0.113     0.151     0.181   <- 채택 (2026-08-22)
-      Ld 1.10    0.151     0.189     0.252     0.303   (UNDER_VOLTAGE 완화용, 트림 수정 후 되돌림)
+      Ld 0.85    0.090     0.113     0.151     0.181
+      Ld 1.10    0.151     0.189     0.252     0.303   <- 채택 (2026-08-22)
   하한은 축거의 2배(0.67m) — 그 아래는 Pure Pursuit 이 진동한다.
 
-  [2026-08-22] 0.85 -> 1.10(UNDER_VOLTAGE 완화) -> **0.85 로 되돌림**.
-  1.10 이 낮추던 조향 첨두 전류 문제는 서보 중립점 트림을 물리적으로
-  고치면서 해소됐다. 그 전 이력: 급커브에서 못 꺾고 안쪽 콘을 쳐서
+  [2026-08-22] 0.85 -> 1.10(UNDER_VOLTAGE 완화) -> 0.85 -> **다시 1.10**.
+  angle_limit 은 35 그대로다(기계적 포화점, 재확인됨) — 이 값은 그와
+  별개로 다시 올린 것이다. 그 전 이력: 급커브에서 못 꺾고 안쪽 콘을 쳐서
   0.85 -> 0.80 으로 줄여봤으나, 짧게 볼수록 직선 응답이 나빠지고 같은
   건에서 고친 목표점 clamp 순서 버그(scan_callback 의 ★ 주석) 쪽 영향이
   훨씬 커서 0.85 로 되돌렸었다.
@@ -151,7 +151,7 @@ class RubberconeNode(Node):
         # ---- Pure Pursuit ----
         self.declare_parameter('wheelbase_m', 0.333)
         self.declare_parameter('lidar_to_rear_axle_m', 0.41)
-        self.declare_parameter('lookahead_dist_m', 0.85)
+        self.declare_parameter('lookahead_dist_m', 1.10)
         self.declare_parameter('lookahead_min_m', 0.3)
         # rad -> degree 변환 상수 그 자체다 (임의의 튜닝값이 아니다).
         # xycar_motor 의 angle 명령이 실제 조향각(도)과 1:1 임이 실측됐다.
