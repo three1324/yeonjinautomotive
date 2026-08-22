@@ -84,7 +84,7 @@ class OvertakeBehavior:
 
     def __init__(self, shift_px,
                  shift_sec, pass_sec, return_sec,
-                 cooldown_sec=1.0, lost_hold_sec=2.0, shift_scale=0.7):
+                 cooldown_sec=1.0, lost_hold_sec=2.0, shift_scale=0.5):
         self.shift_px = shift_px                    # 반폭 미학습 시 폴백값 (픽셀)
         # 회피량 배율. [2026-08-21 실차] 반폭/2 로는 과하게 벌어져 0.7 로 줄였다.
         self.shift_scale = shift_scale
@@ -190,9 +190,9 @@ class OvertakeBehavior:
         못했으면(0) 고정값으로 폴백한다 — 근거는 약하지만 아예 못 피하는 것보다는
         낫다는 판단(사용자 결정). 대신 폴백인지 아닌지를 last_reason 에 남긴다.
 
-        마지막에 shift_scale 을 곱한다. [2026-08-21 실차] 반폭/2 는 너무 크게
-        벌어져서 30% 줄였다(scale 0.7). 폴백 경로에도 같이 곱해야 두 경로의
-        크기 감각이 어긋나지 않는다.
+        마지막에 shift_scale 을 곱한다. 반폭/2 는 실차에서 너무 크게 벌어졌다
+        — 8/21 에 0.7(30% 감소), 8/22 에 0.5(절반)까지 줄였다. 폴백 경로에도
+        같이 곱해야 두 경로의 크기 감각이 어긋나지 않는다.
         """
         base = half_near / 2.0 if half_near > 0.0 else self.shift_px
         return base * self.shift_scale
@@ -300,8 +300,14 @@ class LateralPlanner:
             return target_offset
         return (1.0 - weight) * target_offset + weight * waypoint_offset
 
-    def update(self, dt, obs, image_width):
+    def update(self, dt, obs, image_width, allow_overtake=True):
         """obs: driver_node 가 모아 넘기는 관측 묶음. 목표 오프셋(픽셀) 반환.
+
+        allow_overtake: False 면 이번 tick 은 회피를 하지 않는다. 좌회전 직후
+            차단 구간에서 driver_node 가 내린다 (그 파라미터 주석 참고).
+            **차단 중에는 overtake 를 reset 한다** — 좌회전 TURN_IN 동안 이
+            경로가 아예 안 불렸으므로, 그 전에 기동 중이던 상태가 그대로
+            남아 있을 수 있다. 그걸 들고 복귀하면 엉뚱하게 벌린 채 달린다.
 
         좌회전(지름길)은 여기서 다루지 않는다 (2026-08-22 재설계). 진입
         전(ARM)은 **평소 주행과 완전히 같고**, 꺾는 동안(TURN_IN)은
@@ -310,7 +316,9 @@ class LateralPlanner:
         half_near = getattr(obs, "half_near", 0.0)
         target = 0.0   # 기본은 트랙 중앙
 
-        if self.enable_overtake:
+        if not allow_overtake:
+            self.overtake.reset()
+        elif self.enable_overtake:
             # 카메라 관측만 넘긴다. obs 에는 라이다 값(front_dist 등)도 들어 있지만
             # 회피는 그걸 쓰지 않는다 (OvertakeBehavior 주석 참고).
             # 트랙중앙의 화면 x = 기준선 + 오프셋. 둘 다 perception 이 준다.

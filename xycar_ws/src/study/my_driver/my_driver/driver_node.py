@@ -163,15 +163,22 @@ class DriverNode(Node):
                 # FSM
                 ("fsm.start_confirm_frames", 3),
                 ("fsm.enable_shortcut", False),
-                # 좌회전(지름길) 진입 — 신호 확정 후 arm_sec 만큼 평소대로 달린
-                # 뒤, turn_sec 동안 고정 조향으로 꺾고 차선주행으로 돌아온다.
-                ("fsm.shortcut_arm_sec", 1.5),
+                # 좌회전(지름길) 진입 — LEFT 가 사라지면(= 신호등을 지나면)
+                # arm_sec 만큼 더 평소대로 달린 뒤, turn_sec 동안 고정 조향으로
+                # 꺾고 차선주행으로 돌아온다.
+                ("fsm.shortcut_arm_sec", 0.5),
                 ("fsm.shortcut_turn_sec", 1.0),
+                ("fsm.shortcut_arm_timeout_sec", 5.0),
+                ("fsm.shortcut_lost_frames", 3),
                 ("fsm.shortcut_confirm_frames", 3),
                 # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
                 # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
                 ("shortcut.turn_angle", 35.0),
                 ("shortcut.turn_speed", 10.0),
+                # 좌회전을 끝낸 뒤 이만큼은 회피를 하지 않는다. 분기 직후는
+                # 화면이 평소와 달라 YOLO 가 차량을 오검출하기 쉬운데, 그때
+                # 회피가 걸리면 갓 들어온 길에서 옆으로 벌린 채 달린다.
+                ("shortcut.overtake_block_sec", 20.0),
                 ("fsm.enable_red_stop", True),
                 ("fsm.red_confirm_frames", 3),
                 ("fsm.none_tolerance", 1),
@@ -192,7 +199,7 @@ class DriverNode(Node):
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.shift_px", 120.0),
-                ("lateral.shift_scale", 0.7),
+                ("lateral.shift_scale", 0.5),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
@@ -237,6 +244,8 @@ class DriverNode(Node):
             enable_shortcut=g("fsm.enable_shortcut").value,
             shortcut_arm_sec=g("fsm.shortcut_arm_sec").value,
             shortcut_turn_sec=g("fsm.shortcut_turn_sec").value,
+            shortcut_arm_timeout_sec=g("fsm.shortcut_arm_timeout_sec").value,
+            shortcut_lost_frames=g("fsm.shortcut_lost_frames").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
             enable_red_stop=g("fsm.enable_red_stop").value,
             red_confirm_frames=g("fsm.red_confirm_frames").value,
@@ -265,6 +274,10 @@ class DriverNode(Node):
         )
         self.shortcut_turn_angle = g("shortcut.turn_angle").value
         self.shortcut_turn_speed = g("shortcut.turn_speed").value
+        self.shortcut_overtake_block = g("shortcut.overtake_block_sec").value
+        # 남은 회피 차단 시간(초). 좌회전이 끝나는 순간 채워지고 매 tick 준다.
+        self._overtake_block_left = 0.0
+        self._prev_fsm_state = self.fsm.state
         self.longitudinal = LongitudinalPlanner(
             base_speed=g("speed.base").value,
             min_speed=g("speed.min").value,
@@ -430,6 +443,12 @@ class DriverNode(Node):
         in_cone_zone = self.cone_zone.update(
             dt, self.obs.cone_n, self.obs.cone_max_h)
 
+        # 회피 차단 시간도 여기서 준다. 아래 조기 return(정지·대기) 뒤에 두면
+        # 서 있는 동안 시간이 안 흘러, 신호 대기 한 번에 차단이 무한정
+        # 늘어난다. 벽시계 20초가 맞다.
+        if self._overtake_block_left > 0.0:
+            self._overtake_block_left = max(0.0, self._overtake_block_left - dt)
+
         if not self._enabled:
             self._publish(0.0, 0.0)
             self._pub_debug(self.fsm.state.value, 0.0, 0.0, "disabled")
@@ -449,6 +468,13 @@ class DriverNode(Node):
 
         # dt 를 넘겨야 SHORTCUT 위상 시간(ARM/TURN_IN)이 흘러간다.
         state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
+
+        # 좌회전을 막 끝냈다 -> 회피 차단 시작.
+        if self._prev_fsm_state is State.SHORTCUT and state is not State.SHORTCUT:
+            self._overtake_block_left = self.shortcut_overtake_block
+            self.get_logger().info(
+                f"좌회전 완료 — 회피 {self.shortcut_overtake_block:.0f}초 차단")
+        self._prev_fsm_state = state
 
         # ── 좌회전(지름길) 꺾기 ──
         # **인지를 전혀 보지 않는다.** 아래의 콘 구간 mux 도, 차선 소실 정지도
@@ -551,7 +577,9 @@ class DriverNode(Node):
                 self._pub_debug(state.value, 0.0, 0.0, "ref lost")
                 return
 
-        target_offset = self.lateral.update(dt, self.obs, self.image_width)
+        target_offset = self.lateral.update(
+            dt, self.obs, self.image_width,
+            allow_overtake=(self._overtake_block_left <= 0.0))
         self._target_offset = target_offset
         # lateral 을 먼저 돌려야 이번 tick 의 회피 상태가 정해진다.
         # 종방향은 그 결과(기동 중인지)를 받아 감속한다 — 순서가 중요하다.
@@ -676,6 +704,9 @@ class DriverNode(Node):
             "ot_dir": self.lateral.overtake.direction,
             "ot_amount": round(self.lateral.overtake.amount, 1),
             "ot_reason": self.lateral.overtake.last_reason,
+            # 좌회전 직후 회피 차단이 걸려 있는지. 0 이면 평소대로 회피한다.
+            # 이게 안 보이면 "왜 안 피하지"를 화면에서 못 가른다.
+            "ot_block": round(self._overtake_block_left, 1),
             "half_near": round(self.obs.half_near, 1),
             "target_off": round(float(self._target_offset), 1),
             "reason": reason,
