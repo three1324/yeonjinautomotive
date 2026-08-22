@@ -7,7 +7,11 @@
 
 발행:
     /lane    Float32MultiArray [offset_near, offset_far, valid, quality,
-                               half_near, half_far]
+                               half_near, half_far,
+                               offset_near_left, offset_far_left, valid_left]
+             *_left 는 **가장 왼쪽 노란픽셀 밴드**(lane.left_band_px)만으로
+             만든 추정이다. 좌회전 분기에서 직진 가지와 좌회전 가지가 같이
+             보일 때 좌회전 쪽을 고른다. SHORTCUT 상태에서만 쓰인다.
              half_* 는 학습된 트랙 반폭(px). my_driver 가 회피 목표
              (트랙중앙 ± 반폭/2 = 트랙 반쪽의 중앙)를 만드는 데 쓴다. 0이면 미학습.
     /light   Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT (투표 확정값)
@@ -63,6 +67,7 @@ class PerceptionNode(Node):
                 ("lane.eval_near", 400),
                 ("lane.eval_far", 310),
                 ("lane.center_bias_px", 0.0),
+                ("lane.left_band_px", 30.0),
                 ("lane.min_pts", 50),
                 ("lane.min_span", 20),
                 ("lane.hold_frames", 15),
@@ -74,6 +79,8 @@ class PerceptionNode(Node):
                 ("light.min_weight", 3.0),
                 ("light.min_ratio", 0.5),
                 ("light.miss_tolerance", 10),
+                ("light.min_weight_left", 1.5),
+                ("light.min_ratio_left", 0.45),
                 # 기타
                 ("log_period_sec", 2.0),
                 ("publish_debug_image", False),
@@ -98,6 +105,8 @@ class PerceptionNode(Node):
             min_weight=self.get_parameter("light.min_weight").value,
             min_ratio=self.get_parameter("light.min_ratio").value,
             miss_tolerance=self.get_parameter("light.miss_tolerance").value,
+            min_weight_left=self.get_parameter("light.min_weight_left").value,
+            min_ratio_left=self.get_parameter("light.min_ratio_left").value,
         )
 
         # 모델 로드는 무겁다. 생성자에서 한 번만.
@@ -203,6 +212,7 @@ class PerceptionNode(Node):
             eval_near=g("lane.eval_near").value,
             eval_far=g("lane.eval_far").value,
             center_bias_px=g("lane.center_bias_px").value,
+            left_band_px=g("lane.left_band_px").value,
             min_pts=g("lane.min_pts").value,
             min_span=g("lane.min_span").value,
             hold_frames=g("lane.hold_frames").value,
@@ -249,6 +259,12 @@ class PerceptionNode(Node):
             float(lane.quality),
             float(lane.half_near),
             float(lane.half_far),
+            # [확장 필드] 좌회전(지름길) 전용 — 가장 왼쪽 노란픽셀 밴드만 쓴 추정.
+            # 평소 주행은 이 값을 안 쓴다. driver_node 가 SHORTCUT 상태에서만
+            # 골라 쓴다. 뒤에 붙였으므로 옛 driver_node 와 섞어도 무시된다.
+            float(lane.offset_near_left),
+            float(lane.offset_far_left),
+            1.0 if lane.valid_left else 0.0,
         ]))
         self.pub_light.publish(Int32(data=int(state)))
         self.pub_objects.publish(Float32MultiArray(data=[

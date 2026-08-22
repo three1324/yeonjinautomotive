@@ -120,6 +120,11 @@ class Obs:
     offset_far: float = 0.0
     lane_valid: bool = False
     quality: float = 0.0
+    # 좌회전(지름길) 전용 — 가장 왼쪽 노란픽셀 밴드만으로 만든 추정.
+    # SHORTCUT 상태에서만 쓴다. 평소 주행은 위의 offset_* 를 그대로 쓴다.
+    offset_near_left: float = 0.0
+    offset_far_left: float = 0.0
+    lane_valid_left: bool = False
     # 학습된 트랙 반폭(px). 회피 목표를 "트랙 반쪽의 중앙"으로 잡는 데 쓴다.
     # 0.0 이면 인지가 아직 좌우 흰선을 동시에 본 적이 없다는 뜻 -> 고정값 폴백.
     half_near: float = 0.0
@@ -168,15 +173,14 @@ class DriverNode(Node):
                 # 좌회전(지름길) 진입 — LEFT 가 사라지면(= 신호등을 지나면)
                 # arm_sec 만큼 더 평소대로 달린 뒤, turn_sec 동안 고정 조향으로
                 # 꺾고 차선주행으로 돌아온다.
-                ("fsm.shortcut_arm_sec", 0.5),
-                ("fsm.shortcut_turn_sec", 1.0),
-                ("fsm.shortcut_arm_timeout_sec", 5.0),
-                ("fsm.shortcut_lost_frames", 3),
+                ("fsm.start_on_green", True),
+                ("fsm.start_on_left", False),
+                ("fsm.shortcut_total_sec", 15.0),
+                ("fsm.shortcut_shift_sec", 1.5),
                 ("fsm.shortcut_confirm_frames", 5),
                 # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
                 # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
-                ("shortcut.turn_angle", 35.0),
-                ("shortcut.turn_speed", 10.0),
+                ("shortcut.shift_px", 70.0),
                 # 좌회전을 끝낸 뒤 이만큼은 회피를 하지 않는다. 분기 직후는
                 # 화면이 평소와 달라 YOLO 가 차량을 오검출하기 쉬운데, 그때
                 # 회피가 걸리면 갓 들어온 길에서 옆으로 벌린 채 달린다.
@@ -254,10 +258,10 @@ class DriverNode(Node):
         self.fsm = DriveFSM(
             start_confirm_frames=g("fsm.start_confirm_frames").value,
             enable_shortcut=g("fsm.enable_shortcut").value,
-            shortcut_arm_sec=g("fsm.shortcut_arm_sec").value,
-            shortcut_turn_sec=g("fsm.shortcut_turn_sec").value,
-            shortcut_arm_timeout_sec=g("fsm.shortcut_arm_timeout_sec").value,
-            shortcut_lost_frames=g("fsm.shortcut_lost_frames").value,
+            start_on_green=g("fsm.start_on_green").value,
+            start_on_left=g("fsm.start_on_left").value,
+            shortcut_total_sec=g("fsm.shortcut_total_sec").value,
+            shortcut_shift_sec=g("fsm.shortcut_shift_sec").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
             auto_start=g("fsm.auto_start").value,
         )
@@ -293,8 +297,7 @@ class DriverNode(Node):
             ),
             enable_overtake=g("lateral.enable_overtake").value,
         )
-        self.shortcut_turn_angle = g("shortcut.turn_angle").value
-        self.shortcut_turn_speed = g("shortcut.turn_speed").value
+        self.shortcut_shift_px = g("shortcut.shift_px").value
         self.shortcut_overtake_block = g("shortcut.overtake_block_sec").value
         # 남은 회피 차단 시간(초). 좌회전이 끝나는 순간 채워지고 매 tick 준다.
         self._overtake_block_left = 0.0
@@ -392,6 +395,12 @@ class DriverNode(Node):
         if len(msg.data) >= 6:
             self.obs.half_near = msg.data[4]
             self.obs.half_far = msg.data[5]
+        # 좌회전 전용 좌측밴드 추정. 없으면 lane_valid_left=False 라 SHORTCUT 이
+        # 평소 차선 추정으로 폴백한다 (옛 perception_node 와 섞였을 때).
+        if len(msg.data) >= 9:
+            self.obs.offset_near_left = msg.data[6]
+            self.obs.offset_far_left = msg.data[7]
+            self.obs.lane_valid_left = msg.data[8] > 0.5
         self._last_lane_time = self.get_clock().now()
 
 
@@ -482,7 +491,7 @@ class DriverNode(Node):
             self._pub_debug(self.fsm.state.value, 0.0, 0.0, f"stale({age:.2f}s)")
             return
 
-        # dt 를 넘겨야 SHORTCUT 위상 시간(ARM/TURN_IN)이 흘러간다.
+        # dt 를 넘겨야 SHORTCUT 위상 시간(SHIFT/FOLLOW)이 흘러간다.
         state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
 
         # ── 좌회전 하드코딩 주행 (left_drive.TimedLeftDrive) ──
@@ -499,17 +508,6 @@ class DriverNode(Node):
             self.get_logger().info(
                 f"좌회전 완료 — 회피 {self.shortcut_overtake_block:.0f}초 차단")
         self._prev_fsm_state = state
-
-        # ── 좌회전(지름길) 꺾기 ──
-        # **인지를 전혀 보지 않는다.** 아래의 콘 구간 mux 도, 차선 소실 정지도
-        # 건너뛴다. 둘 다 여기서는 해가 된다:
-        #   - 분기 초입에서 차선이 끊기거나 엉뚱하게 잡히는데, 그 정지 판정에
-        #     걸리면 **꺾는 도중에 선다.**
-        #   - 콘 구간 판정이 겹치면 rubbercone_node 가 조향을 가져가 버린다.
-        # ARM 위상은 여기서 안 걸린다 — 평소 차선 주행 그대로 아래로 흘러간다.
-        if self.fsm.shortcut_phase is ShortcutPhase.TURN_IN:
-            self._drive_shortcut_turn(dt, state)
-            return
 
         if not self.fsm.should_drive:
             self._publish(0.0, 0.0)
@@ -574,8 +572,22 @@ class DriverNode(Node):
         # 여기 도달했다 = 콘 구간이 아니거나, 콘 구간이지만 use_lidar 를 껐다.
         # 어느 쪽이든 횡방향 기준은 **차선 단독**이다.
         # 라이다(복도)를 섞던 fusion 은 제거했다 — 모듈 docstring 참고.
-        ref = LaneRef(self.obs.offset_near, self.obs.offset_far,
-                      self.obs.lane_valid, self.obs.quality)
+        # ── 좌회전(지름길)이면 **좌측밴드 노란선**을 기준으로 쓴다 ──
+        # 분기점에서는 dashed 마스크에 직진 가지와 좌회전 가지가 같이 들어와,
+        # 전부 평균낸 offset 은 그 사이를 겨냥해 어느 쪽도 못 탄다.
+        # 좌측밴드는 행별로 가장 왼쪽 픽셀에서 lane.left_band_px 안쪽만 남긴
+        # 추정이라 좌회전 가지가 선택되고, 좌회전을 마친 뒤에는 합류 차선을
+        # 그대로 따라간다. (인지가 계산해 /lane 에 실어 보낸 값이다.)
+        #
+        # 좌측밴드가 무효면(노란선을 아예 못 봄, 또는 옛 perception_node)
+        # 평소 추정으로 폴백한다 — 갈 곳이 없는 것보다 낫다.
+        use_left_band = (state is State.SHORTCUT and self.obs.lane_valid_left)
+        if use_left_band:
+            ref = LaneRef(self.obs.offset_near_left, self.obs.offset_far_left,
+                          True, self.obs.quality)
+        else:
+            ref = LaneRef(self.obs.offset_near, self.obs.offset_far,
+                          self.obs.lane_valid, self.obs.quality)
         self._ref = ref
 
         # 차선을 오래 못 보면 정지.
@@ -597,6 +609,22 @@ class DriverNode(Node):
         target_offset = self.lateral.update(
             dt, self.obs, self.image_width,
             allow_overtake=(self._overtake_block_left <= 0.0))
+
+        # ── 좌회전 진입 직후: 1차선으로 붙는다 ──
+        # SHIFT 위상 동안 목표를 왼쪽으로 shortcut_shift_px 만큼 옮긴다.
+        # 회피 기동과 **같은 방식**이다(목표만 계단으로 옮기고, 실제 거동은
+        # 조향 rate limit / LPF 가 만든다).
+        #
+        # 목적은 회피가 아니라 **시야**다. 트랙 중앙에 있으면 좌회전 차선의
+        # 노란선이 화면 왼쪽 끝에 걸리거나 아예 안 잡힌다. 1차선으로 붙어야
+        # 좌측밴드 추정이 안정적으로 잡힌다.
+        #
+        # 부호: target_offset 이 **양수면 차가 트랙 왼쪽**에 선다
+        # (lateral.py _offset 주석의 부호 규약과 같다). 그래서 왼쪽으로
+        # 옮기려면 **더한다**.
+        if self.fsm.shortcut_phase is ShortcutPhase.SHIFT:
+            target_offset += self.shortcut_shift_px
+
         self._target_offset = target_offset
         # lateral 을 먼저 돌려야 이번 tick 의 회피 상태가 정해진다.
         # 종방향은 그 결과(기동 중인지)를 받아 감속한다 — 순서가 중요하다.
@@ -723,36 +751,6 @@ class DriverNode(Node):
         self._log(state, angle, speed, reason)
         self._pub_debug(state.value, angle, speed, reason)
 
-    def _drive_shortcut_turn(self, dt, state):
-        """좌회전 진입 — 고정 조향각 + 고정 속도. 인지는 안 본다.
-
-        왜 고정값인가: 분기 초입은 차선이 한쪽만 보이거나 아예 끊긴다. 그
-        상태의 offset 을 믿고 제어하면 꺾다 말고 되돌아온다. 정해진 시간 동안
-        정해진 각도로 도는 것이 유일하게 재현 가능한 방법이다.
-
-        **속도도 같이 고정해야** 회전 반경이 재현된다 — 같은 조향각이라도
-        속도가 다르면 반경이 달라진다. 다만 SpeedLimiter 는 통과시킨다.
-        알고리즘이 아니라 하드웨어 보호다(콘 구간과 같은 이유 — 급가속이
-        배터리 전압을 끌어내려 VESC 가 UNDER_VOLTAGE 로 멈춘다).
-
-        조향은 rate limit 도 안 씌운다. 씌우면 1초짜리 기동에서 목표 각도에
-        닿기도 전에 끝난다. 대신 steering.sync() 로 내부 상태를 맞춰서,
-        차선주행으로 돌아가는 순간 각도가 튀지 않게 한다.
-        """
-        angle = float(self.shortcut_turn_angle)
-        speed = self.speed_limiter.update(dt, self.shortcut_turn_speed)
-        self.steering.sync(angle)
-
-        if self._last_source != "shortcut":
-            self.get_logger().info(
-                f"SHORTCUT/TURN_IN — 고정 조향 {angle:+.1f} 로 좌회전 진입 "
-                f"({self.fsm.shortcut_turn_sec:.1f}s)")
-            self._last_source = "shortcut"
-
-        self._publish(angle, speed)
-        self._log(state, angle, speed, "shortcut(turn_in)")
-        self._pub_debug(state.value, angle, speed, "shortcut(turn_in)")
-
     def _drive_cone_zone(self, dt, state):
         """라바콘 구간 — rubbercone_node 명령을 그대로 통과시킨다.
 
@@ -802,8 +800,8 @@ class DriverNode(Node):
             "cone_h": round(self.obs.cone_max_h, 0),
             "zone_why": self.cone_zone.last_reason,
             # 좌회전(지름길) 위상과 그 위상의 남은 시간. 위상이 "-" 면 그
-            # 구간이 아니다. ARM(평소 주행)인지 TURN_IN(고정 조향)인지가
-            # 화면에서 바로 구분돼야 "왜 차선을 무시하나"를 오해하지 않는다.
+            # 구간이 아니다. SHIFT(왼쪽으로 붙는 중)인지 FOLLOW(좌측밴드
+            # 추종)인지가 화면에서 바로 구분돼야 한다.
             "shortcut_phase": (self.fsm.shortcut_phase.value
                                if self.fsm.shortcut_phase else "-"),
             "shortcut_remain": round(self.fsm.shortcut_remain, 1),

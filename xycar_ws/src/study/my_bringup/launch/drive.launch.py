@@ -11,17 +11,22 @@
                   잡으려 해서 충돌한다. 근거: JETSON_ROS1_DOCKER_MOTOR.md §8-(3)
     slam          SLAM 측위를 같이 띄울지 (기본 false — 1단계에서는 불필요)
 
-    debug            OpenCV 파이프라인 뷰어(카메라 시점)를 띄울지 (기본 false)
-    rviz             RViz2(공간 시점)까지 같이 띄울지 (기본 false)
-                     rviz:=true 면 debug 값과 무관하게 /debug_image 도 자동으로 켜지고
-                     OpenCV 뷰어와 RViz2 두 창이 함께 뜬다. 즉 명령 한 줄이면 된다:
-                         ros2 launch my_bringup drive.launch.py rviz:=true
-                     ⚠️ 시각화는 CPU 를 쓴다. 기록 주행/실전에서는 둘 다 false 로 둘 것.
+    debug            OpenCV 파이프라인 뷰어(카메라 시점)를 띄울지 (기본 **true**)
+    rviz             RViz2(공간 시점)까지 같이 띄울지 (기본 **true**)
+
+★ [2026-08-22] debug/rviz 기본값을 true 로 바꿨다. **명령 한 줄이면 전부 뜬다:**
+        ros2 launch my_bringup drive.launch.py
+  뜨는 것: 카메라 + 라이다 드라이버, perception_node, rubbercone_node,
+           driver_node, OpenCV 파이프라인 뷰어, RViz2.
+  ⚠️ 시각화는 CPU 를 쓴다. 기록 주행/실전에서는 꺼서 쓸 것:
+        ros2 launch my_bringup drive.launch.py debug:=false rviz:=false
 
 안전: **이 launch 만으로 주행 준비가 끝난다** (require_enable=false, 2026-08-22).
       /drive_enable 을 따로 쏠 필요가 없다. 안전장치가 사라진 게 아니라
       신호등으로 옮겨간 것이다 — fsm.auto_start 가 false 라 WAIT_LIGHT 에서
-      초록불(또는 좌회전 화살표) 확정까지 서 있는다.
+      신호 확정까지 서 있는다.
+      ★ [2026-08-22] 출발 신호가 **좌회전 화살표(LEFT)** 다
+        (fsm.start_on_green=false / start_on_left=true). 초록불로는 안 나간다.
       ⚠️ 뒤집어 말하면 **신호등 오검출 한 번에 출발한다.** 벤치에서 차를
          들어올리고 테스트할 때는 drive_params.yaml 의 require_enable 을
          true 로 되돌리고, 그때는 다음이 다시 필요하다:
@@ -87,11 +92,14 @@ def generate_launch_description():
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('motor', default_value='false'),
         DeclareLaunchArgument('slam', default_value='false'),
-        # true 로 켜면 perception_node 가 /debug_image 를 내고 my_debug 뷰어 창이 뜬다.
-        DeclareLaunchArgument('debug', default_value='false'),
+        # [2026-08-22] 기본값 false -> **true**. 명령 한 줄로 전부 뜨게 한다.
+        #   ros2 launch my_bringup drive.launch.py
+        # 끄려면: ros2 launch my_bringup drive.launch.py debug:=false rviz:=false
+        # ⚠️ 시각화는 CPU 를 쓴다. 기록 주행/실전에서는 꺼서 쓸 것.
+        DeclareLaunchArgument('debug', default_value='true'),
         # RViz2(공간 시점: 라이다 포인트클라우드/오도메트리/경로)까지 같이 띄운다.
         # 켜면 debug 와 무관하게 /debug_image 도 자동으로 켜진다(위 show_debug_image).
-        DeclareLaunchArgument('rviz', default_value='false'),
+        DeclareLaunchArgument('rviz', default_value='true'),
     ]
 
     # --- 센서 드라이버 ---

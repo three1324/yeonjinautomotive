@@ -252,13 +252,13 @@ class LateralPlanner:
 
         allow_overtake: False 면 이번 tick 은 회피를 하지 않는다. 좌회전 직후
             차단 구간에서 driver_node 가 내린다 (그 파라미터 주석 참고).
-            **차단 중에는 overtake 를 reset 한다** — 좌회전 TURN_IN 동안 이
+            **차단 중에는 overtake 를 reset 한다** — 좌회전 SHORTCUT 동안 이
             경로가 아예 안 불렸으므로, 그 전에 기동 중이던 상태가 그대로
             남아 있을 수 있다. 그걸 들고 복귀하면 엉뚱하게 벌린 채 달린다.
 
-        좌회전(지름길)은 여기서 다루지 않는다. 진입 전(ARM)은 **평소 주행과
-        완전히 같고**, 꺾는 동안(TURN_IN)은 driver_node 가 이 경로를 아예
-        거치지 않고 고정 조향을 낸다.
+        좌회전(지름길)의 목표 오프셋(SHIFT 위상의 +70px)은 여기가 아니라
+        driver_node 가 이 함수의 결과에 더한다 — FSM 위상을 아는 쪽이
+        거기이기 때문이다.
         """
         target = 0.0   # 기본은 트랙 중앙
 

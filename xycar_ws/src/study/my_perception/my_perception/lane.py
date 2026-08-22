@@ -53,6 +53,18 @@ class LaneResult:
     half_near: float = 0.0
     half_far: float = 0.0
 
+    # --- 좌회전(지름길) 전용: **가장 왼쪽 노란픽셀 밴드**만 쓴 추정 ---
+    # 분기점에서는 dashed 마스크에 직진 노란선과 좌회전 노란선이 **둘 다**
+    # 들어온다. 전부 평균내면 그 사이 어딘가를 겨냥해 어느 쪽도 못 탄다.
+    # 행별로 가장 왼쪽 픽셀에서 left_band_px 안쪽만 남기면 좌회전 가지가
+    # 선택되고, 좌회전을 마친 뒤에는 합류 차선을 그대로 따라간다.
+    #
+    # 평소 주행은 이 값을 **쓰지 않는다** — driver_node 가 SHORTCUT 상태에서만
+    # 골라 쓴다. 판단은 my_driver 의 몫이므로 여기서는 값만 실어 보낸다.
+    offset_near_left: float = 0.0
+    offset_far_left: float = 0.0
+    valid_left: bool = False
+
 
 def _fit(instances, y_lo, y_hi, min_pts, min_span):
     """(xs, ys) 인스턴스들을 합쳐 x = f(y) 2차 다항식으로 피팅. 실패 시 None."""
@@ -68,6 +80,31 @@ def _fit(instances, y_lo, y_hi, min_pts, min_span):
     if float(ys.max() - ys.min()) < min_span:
         return None
     return np.polyfit(ys, xs, 2)
+
+
+def _left_band(instances, band_px):
+    """행마다 **가장 왼쪽 픽셀에서 band_px 이내**만 남긴다.
+
+    분기점에서 직진 노란선과 좌회전 노란선이 같이 잡힐 때, 왼쪽 가지만
+    고르기 위한 필터다. 행별로 자르는 이유: 전체 최소 x 하나로 자르면
+    원근 때문에 먼 행이 통째로 탈락한다(먼 행일수록 x 가 중앙에 몰린다).
+
+    반환: [(xs, ys)] 형태의 인스턴스 1개. 남은 픽셀이 없으면 [].
+    """
+    if band_px <= 0 or not instances:
+        return instances
+    xs = np.concatenate([p[0] for p in instances])
+    ys = np.concatenate([p[1] for p in instances])
+    if xs.size == 0:
+        return []
+    rows = ys.astype(np.int64)
+    idx = rows - rows.min()
+    min_x = np.full(int(idx.max()) + 1, np.inf)
+    np.minimum.at(min_x, idx, xs.astype(np.float64))
+    keep = xs <= min_x[idx] + band_px
+    if not keep.any():
+        return []
+    return [(xs[keep], ys[keep])]
 
 
 class LaneEstimator:
@@ -113,6 +150,7 @@ class LaneEstimator:
         half_alpha=0.05,
         max_center_offset_px=480.0,
         max_jump_px=250.0,
+        left_band_px=30.0,
     ):
         self.width = width
         self.height = height
@@ -131,10 +169,15 @@ class LaneEstimator:
         self.max_center_offset_px = max_center_offset_px
         # 직전 채택값에서 이만큼 넘게 튄 추정은 기각 (물리적으로 불가능한 이동)
         self.max_jump_px = max_jump_px
+        # 좌회전 전용 밴드 폭(px). 0 이면 좌측밴드 추정을 끈다.
+        self.left_band_px = left_band_px
 
         self._half = {eval_near: None, eval_far: None}
         # 행별로 마지막에 채택된 중앙 x. 이상치 판정의 기준.
         self._last_center = {eval_near: None, eval_far: None}
+        # 좌측밴드 경로는 **별도의** 이상치 기준을 쓴다. 같은 딕셔너리를
+        # 공유하면 두 경로가 서로의 max_jump 판정을 오염시킨다.
+        self._last_center_lb = {eval_near: None, eval_far: None}
         self._last = LaneResult(0.0, 0.0, False, 0.0)
         self._miss = 0
         self._rejected = 0                  # 이상치로 버린 횟수 (진단용)
@@ -142,6 +185,7 @@ class LaneEstimator:
     def reset(self):
         self._half = {self.eval_near: None, self.eval_far: None}
         self._last_center = {self.eval_near: None, self.eval_far: None}
+        self._last_center_lb = {self.eval_near: None, self.eval_far: None}
         self._last = LaneResult(0.0, 0.0, False, 0.0)
         self._miss = 0
         self._rejected = 0
@@ -196,7 +240,7 @@ class LaneEstimator:
             return self._accept(row, xr - half, 0.4)
         return None, 0.0
 
-    def _accept(self, row, center_x, quality):
+    def _accept(self, row, center_x, quality, store=None):
         """이상치를 걸러낸 뒤 채택한다. 기각되면 (None, 0.0) 을 돌려 hold 로 넘긴다.
 
         모든 경로에 공통 적용한다. 극단값이 저신뢰 경로가 아니라 quality 0.9
@@ -209,13 +253,25 @@ class LaneEstimator:
             return None, 0.0
 
         # ② 급변 상한 — 직전 채택값에서 이만큼 튀는 것은 물리적으로 불가능하다.
-        prev = self._last_center[row]
+        store = self._last_center if store is None else store
+        prev = store[row]
         if prev is not None and abs(center_x - prev) > self.max_jump_px:
             self._rejected += 1
             return None, 0.0
 
-        self._last_center[row] = center_x
+        store[row] = center_x
         return center_x, quality
+
+    def _dashed_center_at(self, row, f_dashed_lb):
+        """좌측밴드 노란선만으로 목표 x 를 낸다 (흰 실선을 쓰지 않는다).
+
+        좌회전 분기에서는 흰 실선이 **다른 차로의 경계**라 섞으면 오히려
+        직진 차로 쪽으로 끌린다. 그래서 이 경로는 노란선 단독이다.
+        """
+        if f_dashed_lb is None:
+            return None, 0.0
+        x = float(np.polyval(f_dashed_lb, row))
+        return self._accept(row, x, 0.9, store=self._last_center_lb)
 
     def update(self, dashed_instances, solid_instances):
         """프레임당 1회 호출.
@@ -225,6 +281,12 @@ class LaneEstimator:
             신뢰도 필터링은 호출부(ROS 노드/오프라인 도구)에서 끝난 상태로 넘어온다.
         """
         f_dashed = _fit(dashed_instances, self.y_lo, self.y_hi, self.min_pts, self.min_span)
+        # 좌회전 전용 경로. 평소 주행에는 영향이 없다 — 값만 같이 실어 보내고
+        # 쓸지 말지는 driver_node 가 FSM 상태로 정한다.
+        f_dashed_lb = _fit(_left_band(dashed_instances, self.left_band_px),
+                           self.y_lo, self.y_hi, self.min_pts, self.min_span)
+        cn_lb, _ = self._dashed_center_at(self.eval_near, f_dashed_lb)
+        cf_lb, _ = self._dashed_center_at(self.eval_far, f_dashed_lb)
         left, right = self._split_solid(solid_instances, f_dashed)
         f_left = _fit(left, self.y_lo, self.y_hi, self.min_pts, self.min_span)
         f_right = _fit(right, self.y_lo, self.y_hi, self.min_pts, self.min_span)
@@ -241,6 +303,9 @@ class LaneEstimator:
                     self._last.offset_near, self._last.offset_far, False, 0.0,
                     half_near=self._half[self.eval_near] or 0.0,
                     half_far=self._half[self.eval_far] or 0.0,
+                    offset_near_left=self._last.offset_near_left,
+                    offset_far_left=self._last.offset_far_left,
+                    valid_left=False,
                 )
             return self._last
 
@@ -251,6 +316,16 @@ class LaneEstimator:
             c_far, q_far = c_near, q_near * 0.7
 
         target = self.width / 2.0 + self.center_bias_px
+
+        # 좌측밴드: 한쪽 행만 잡히면 다른 행을 그 값으로 대체한다(본 경로와 동일).
+        valid_left = cn_lb is not None or cf_lb is not None
+        if cn_lb is None:
+            cn_lb = cf_lb
+        if cf_lb is None:
+            cf_lb = cn_lb
+        off_n_lb = (cn_lb - target) if valid_left else self._last.offset_near_left
+        off_f_lb = (cf_lb - target) if valid_left else self._last.offset_far_left
+
         self._miss = 0
         self._last = LaneResult(
             offset_near=c_near - target,
@@ -259,5 +334,8 @@ class LaneEstimator:
             quality=min(q_near, q_far),
             half_near=self._half[self.eval_near] or 0.0,
             half_far=self._half[self.eval_far] or 0.0,
+            offset_near_left=off_n_lb,
+            offset_far_left=off_f_lb,
+            valid_left=valid_left,
         )
         return self._last

@@ -30,10 +30,23 @@ STATE_TO_NAME = {NONE: "NONE", RED: "RED", YELLOW: "YELLOW", GREEN: "GREEN", LEF
 class LightVoter:
     """최근 N프레임의 램프 관측을 가중 투표해 하나의 상태로 확정한다."""
 
-    def __init__(self, window, min_weight, min_ratio, miss_tolerance=10):
+    def __init__(self, window, min_weight, min_ratio, miss_tolerance=10,
+                 min_weight_left=None, min_ratio_left=None):
         self.window = window          # 투표에 쓸 프레임 수 (30fps 기준 30 = 1초)
         self.min_weight = min_weight  # 이 가중치합에 못 미치면 확정하지 않음
         self.min_ratio = min_ratio    # 1위 상태가 전체의 이 비율은 넘어야 확정
+        # ★ LEFT 전용 문턱 (2026-08-22). None 이면 위 공통값을 그대로 쓴다.
+        #
+        #   왜 따로 두나: 공통값을 낮추면 **GREEN 오검출로 빨간불에 출발**하는
+        #   위험이 같이 커진다. start_sim.py 5000회 몬테카를로에서 min_ratio 를
+        #   0.6 -> 0.5 로 낮추자 조기출발이 1회 -> 48회로 뛰었다(실격 위험).
+        #   LEFT 는 그 실패 모드와 무관하므로 여기만 따로 낮춘다.
+        #   ⚠️ 그래도 공짜는 아니다 — LEFT 오검출은 차를 좌회전 분기로
+        #      보낸다. 되돌아오는 데 shortcut_total_sec(15초)가 걸린다.
+        self.min_weight_left = (min_weight if min_weight_left is None
+                                else min_weight_left)
+        self.min_ratio_left = (min_ratio if min_ratio_left is None
+                               else min_ratio_left)
         # 신호등이 몇 프레임 연속 안 보여야 "시야에서 벗어났다"고 볼지.
         # 1프레임만 놓쳐도 표를 버리면 검출이 잠깐 깜빡일 때마다 판정이 초기화된다.
         self.miss_tolerance = miss_tolerance
@@ -86,7 +99,10 @@ class LightVoter:
         total = sum(tally.values())
         best_state, best_w = max(tally.items(), key=lambda kv: kv[1])
 
-        if best_w >= self.min_weight and best_w / total >= self.min_ratio:
+        # LEFT 만 별도 문턱을 쓴다 (생성자 주석 참고).
+        need_w = self.min_weight_left if best_state == LEFT else self.min_weight
+        need_r = self.min_ratio_left if best_state == LEFT else self.min_ratio
+        if best_w >= need_w and best_w / total >= need_r:
             self._state = best_state
         return self._state
 
