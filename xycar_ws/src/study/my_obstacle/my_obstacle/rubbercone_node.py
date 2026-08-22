@@ -113,8 +113,13 @@ class RubberconeNode(Node):
         # ---- ROI: 직사각형 + 거리 상한 ----
         # 부채꼴(max_angle_deg)을 버린 이유는 모듈 docstring 3) 참고.
         self.declare_parameter('forward_min', 0.15)
-        self.declare_parameter('side_half_m', 1.00)
-        self.declare_parameter('range_max_m', 1.40)
+        # ★ [2026-08-22] 1.00 -> 2.50, 1.40 -> 2.50.
+        #   깊은 굽이(R≈0.50m)에서 바깥쪽 벽이 거리 상한 밖으로 밀려나
+        #   **한쪽 벽이 통째로 안 보였다.** 근거와 되돌리는 순서는
+        #   drive_params.yaml 의 같은 항목에 적어 두었다.
+        #   side_half_m 은 range_max_m 과 같아서 아무것도 안 자른다(무효).
+        self.declare_parameter('side_half_m', 2.50)
+        self.declare_parameter('range_max_m', 2.50)
 
         # ---- 클러스터링 + 콘 모양 필터 ----
         # 콘 표면 간 실제 간격은 0.425 - 0.10 = 0.325m 라 0.15 는 안전하다.
@@ -298,7 +303,12 @@ class RubberconeNode(Node):
         잘린다.** 안쪽 벽은 y 가 가파르게 올라가기 때문이다(검산에서 좌벽이
         1개만 남았다). 커브에서는 "얼마나 앞"이 아니라 "얼마나 가까이"가
         올바른 경계다.
-        폭 상한(|y|)은 남겨둔다 — 차 바로 옆의 벽·기둥을 잘라낸다.
+
+        ★ [2026-08-22] 폭 상한(|y|)은 **지금 아무것도 안 자른다.**
+          side_half_m 을 range_max_m 과 같게 뒀기 때문이다. 깊은 굽이에서
+          폭 제한이 바깥쪽 벽 콘을 먼저 잘라내, 거리를 아무리 늘려도 각 벽
+          3개가 안 되는 지점이 대부분이 됐다(154개 중 127개). 조건문은
+          되돌릴 수 있게 남겨 둔다 — 근거와 복구 순서는 drive_params.yaml.
         """
         out = []
         for (x, y) in points:
@@ -656,11 +666,13 @@ class RubberconeNode(Node):
     def _publish_debug(self, roi_points, left, right, path, target, angle,
                        source, eff_ld):
         size = 500
-        scale = 150.0
+        # [2026-08-22] range_max 가 2.5m 로 늘면서 150 px/m 로는 ROI 원이
+        # 화면 밖으로 나갔다. 100 px/m 면 좌우 ±2.5m 가 정확히 들어온다.
+        scale = 100.0
         origin = (size // 2, size - 30)
         img = np.zeros((size, size, 3), dtype=np.uint8)
 
-        for radius_m in (0.5, 1.0, 1.5, 2.0):
+        for radius_m in (0.5, 1.0, 1.5, 2.0, 2.5):
             cv2.circle(img, origin, int(radius_m * scale), (40, 40, 40), 1)
 
         def to_px(x, y):

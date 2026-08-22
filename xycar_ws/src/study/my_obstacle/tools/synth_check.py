@@ -54,8 +54,8 @@ MIN_CONES = 2
 MIN_GAP = 0.70          # drive_params.yaml min_gap_m 와 같아야 한다 (2026-08-22: 0.60 -> 0.70)
 MAX_GAP = 0.82          # ★ P*2(0.85) 보다 작아야 한다 (2026-08-22: 1.00 -> 0.82)
 TANGENT_COS = 0.50      # centerline 방향 검사 (같은 벽 짝짓기 차단)
-SIDE_HALF = 1.00
-RANGE_MAX = 1.40
+SIDE_HALF = 2.50        # [2026-08-22] 1.00 -> 2.50 (= RANGE_MAX, 사실상 무효)
+RANGE_MAX = 2.50        # [2026-08-22] 1.40 -> 2.50. 근거는 drive_params.yaml
 FORWARD_MIN = 0.15
 LOOKAHEAD = 0.85
 WHEELBASE = 0.333
