@@ -381,6 +381,16 @@ rubbercone_node:
     #      분모가 커지면 같은 조향에서 **덜** 감속한다. 다만 min_speed(5.0)
     #      하한이 걸려 있어 실제 차이는 작다.
     invert_steer: false        # [실측 2026-08-19] 반전 불필요 확인됨
+    steer_trim_deg: 0.0
+    # ↑ [2026-08-22] 조향 중립점(하드웨어 트림) 보정. 근거와 부호는
+    #   rubbercone_node.py 의 같은 파라미터 주석 참고. 요약:
+    #     실차 증상 — 왼쪽 회전 정상, 오른쪽 회전 지연+각도부족, 직진 중
+    #     좌측 쏠림. Pure Pursuit 계산은 좌우 대칭임을 코드로 확인했으므로
+    #     서보 중립점이 왼쪽으로 치우친 것으로 본다.
+    #   재시작 없이 찾는다: ros2 param set /rubbercone_node steer_trim_deg -2.0
+    #   부호: 양수 = 차를 더 왼쪽으로, 음수 = 더 오른쪽으로.
+    #   ⚠️ 임시 보정이다. 물리 트림(서보 혼 / VESC steering_angle_to_servo_offset)
+    #      을 고치면 0.0 으로 되돌릴 것.
 
     # --- 목표점 안정화 (원본 주석: "실차에서 필요했던 안전장치") ---
     target_smoothing_alpha: 0.5
