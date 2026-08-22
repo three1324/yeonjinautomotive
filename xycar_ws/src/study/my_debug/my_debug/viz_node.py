@@ -94,6 +94,12 @@ class VizNode(Node):
                 ("plan_horizon_sec", 2.0),
                 ("plan_dt", 0.1),
                 ("plan_min_speed_mps", 0.3),  # 정지 중에도 조향 방향은 보이게 하는 최소 속도
+                # 라바콘 구간에서는 전체 스캔 클라우드를 **끈다**.
+                # 그 구간에서 알고 싶은 건 점 구름이 아니라 rubbercone_node 가
+                # 낸 콘 마커(/rubbercone/cones — 좌 파랑 / 우 빨강, 콘 하나 =
+                # 큰 점 하나)이고, 점이 깔려 있으면 그게 안 보인다.
+                # 구간 밖에서는 평소대로 나온다. false 로 두면 항상 나온다.
+                ("hide_scan_in_cone_zone", True),
                 # --- 지나온 궤적 ---
                 ("driven_path_max_poses", 2000),
                 ("driven_path_min_step_m", 0.05),
@@ -118,6 +124,7 @@ class VizNode(Node):
         self.driven_max = int(p("driven_path_max_poses").value)
         self.driven_step = float(p("driven_path_min_step_m").value)
         self.odom_timeout = float(p("odom_timeout_sec").value)
+        self.hide_scan_in_cone_zone = bool(p("hide_scan_in_cone_zone").value)
 
         sensor_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -156,7 +163,15 @@ class VizNode(Node):
     # ------------------------------------------------------------------ 구독
 
     def on_scan(self, msg):
-        """LaserScan -> PointCloud2. RViz 의 PointCloud2 패널에 등록해서 본다."""
+        """LaserScan -> PointCloud2. RViz 의 PointCloud2 패널에 등록해서 본다.
+
+        라바콘 구간에서는 발행을 멈춘다(hide_scan_in_cone_zone). 판정은
+        driver_node 가 /debug_state 로 알려주는 것을 그대로 쓴다 — 이 노드가
+        따로 판단하면 실제 제어와 다른 그림이 나온다.
+        """
+        if (self.hide_scan_in_cone_zone
+                and (self._state or {}).get("cone_zone")):
+            return
         n = len(msg.ranges)
         if n == 0:
             return

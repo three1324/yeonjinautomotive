@@ -42,7 +42,7 @@ from my_obstacle import geometry as geo  # noqa: E402
 
 # ── 실측 치수 ──
 W = geo.CORRIDOR_WIDTH_M          # 0.80 콘 중심 간 복도 폭
-P = geo.CONE_PITCH_M              # 0.434 같은 줄 콘 간격
+P = geo.CONE_PITCH_M              # 0.425 같은 줄 콘 간격 (한 칸 건너 0.85)
 AXLE = geo.LIDAR_TO_REAR_AXLE_M   # 0.41 라이다 -> 뒤축
 CLEARANCE = 0.20                  # 좌우 여유 (통과폭 0.70 - 차폭 0.30) / 2
 
@@ -51,8 +51,9 @@ CHAIN_MAX = 0.60
 EXTEND = 0.55
 REASSIGN = 0.30
 MIN_CONES = 2
-MIN_GAP = 0.60
-MAX_GAP = 1.00
+MIN_GAP = 0.70          # drive_params.yaml min_gap_m 와 같아야 한다 (2026-08-22: 0.60 -> 0.70)
+MAX_GAP = 0.82          # ★ P*2(0.85) 보다 작아야 한다 (2026-08-22: 1.00 -> 0.82)
+TANGENT_COS = 0.50      # centerline 방향 검사 (같은 벽 짝짓기 차단)
 SIDE_HALF = 1.00
 RANGE_MAX = 1.40
 FORWARD_MIN = 0.15
@@ -262,7 +263,7 @@ def run(drop_rate=0.0, noise=0.0, seed=1, verbose=False, lateral=0.54):
 def _plan(left, right, prev_target=None):
     """rubbercone_node._plan_path() 와 같은 결정 순서를 재현한다."""
     if left and right:
-        path = geo.centerline(left, right, MIN_GAP, MAX_GAP, EXTEND)
+        path = geo.centerline(left, right, MIN_GAP, MAX_GAP, EXTEND, TANGENT_COS)
         if path:
             return path, 'center'
     for chain in (left, right):

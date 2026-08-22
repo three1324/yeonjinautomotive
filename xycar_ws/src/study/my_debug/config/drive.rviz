@@ -6,12 +6,24 @@
 # 등록된 패널:
 #   Image  /debug_image     ← 좌: YOLO 검출 / 우: 차선(변환) — perception_node 2분할 영상
 #   Image  /image_raw       ← 원본 카메라
-#   LaserScan /scan         ← 라이다 원시 스캔
+#   LaserScan /scan         ← 라이다 원시 스캔 (**기본 off** — 아래 참고)
 #   PointCloud2 /viz/scan_cloud  ← viz_node 가 변환한 포인트클라우드
+#                                  (라바콘 구간에서는 자동으로 멈춘다)
+#   MarkerArray /rubbercone/cones ← 콘 하나 = 큰 점 하나.
+#                                   **파랑 = 좌측 사슬 / 빨강 = 우측 사슬**
 #   Odometry /viz/odom      ← 차량 위치/자세
 #   Path /viz/driven_path   ← 지나온 궤적 (흰색)
 #   Path /viz/plan_path     ← 현재 명령의 예측 경로 (초록)
 #   MarkerArray /viz/markers ← FSM 상태 텍스트(노랑=차선 / 빨강=라바콘) + 차체
+#
+# [2026-08-22] 라바콘 구간에서는 **점 구름을 안 보여준다.**
+#   그 구간에서 알고 싶은 건 "점이 어디 있나"가 아니라 **"어느 콘이 어느
+#   벽으로 배정됐나"** 이고, 점이 깔려 있으면 그게 안 보이기 때문이다.
+#     - 원시 LaserScan 디스플레이는 기본 off (필요하면 트리에서 켤 것)
+#     - /viz/scan_cloud 는 구간 안에서 viz_node 가 발행을 멈춘다
+#       (viz_node 파라미터 hide_scan_in_cone_zone:=false 로 끌 수 있다)
+#     - 대신 /rubbercone/cones 가 콘을 좌 파랑 / 우 빨강 큰 점으로 낸다
+#   좌/우 배정이 틀리면(한 벽이 두 색으로 갈리면) 바로 그게 버그다.
 #
 # 라이다에서 나온 복도 중앙선(/viz/ref_path, /corridor_path, /cone_walls)은
 # 전부 뺐다 — obstacle_node 를 지웠기 때문이다(2026-08-21). 라이다를 쓰는
@@ -101,8 +113,8 @@ Visualization Manager:
       Class: rviz_default_plugins/LaserScan
       Color: 255; 255; 255
       Color Transformer: Intensity
-      Enabled: true
-      Name: LaserScan (/scan)
+      Enabled: false
+      Name: LaserScan (/scan) - 기본 off
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
@@ -215,6 +227,18 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /viz/plan_path
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: cones (/rubbercone/cones)
+      Namespaces:
+        {}
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rubbercone/cones
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true

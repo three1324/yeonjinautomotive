@@ -29,7 +29,7 @@ traffic_cone 클래스로 직접 안다(cone_n). 라이다는 그 구간에서 *
 점 20개를 쉽게 넘긴다.
 
 그래서 판정을 다시 카메라로 되돌린다. **콘 8개 이상 + 충분히 가까우면 진입,
-2개 이하면 이탈**이다 (크기 조건은 바로 아래 절 참고). /cone_zone_active(라이다 판정)는 이제 제어에 쓰지 않고 진단
+4개 이하면 이탈**이다 (크기 조건은 바로 아래 절 참고). /cone_zone_active(라이다 판정)는 이제 제어에 쓰지 않고 진단
 로그로만 남긴다.
 
 ────────────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ class ConeZoneDetector:
     exit_hold_sec:      이탈 후보가 된 뒤에도 이 시간만큼은 구간을 유지한다
     """
 
-    def __init__(self, enter_n=8, exit_n=2, exit_hold_sec=1.5,
+    def __init__(self, enter_n=8, exit_n=4, exit_hold_sec=1.5,
                  enter_min_size_px=100.0):
         self.enter_n = enter_n
         self.exit_n = exit_n

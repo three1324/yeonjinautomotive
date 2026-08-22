@@ -45,7 +45,12 @@ class Detections:
     # 방해차량
     car_present: bool = False
     car_cx: float = 0.0        # 화면상 x중심 (좌/우 판단용)
-    car_bottom_y: float = 0.0  # bbox 하단 y (접근도)
+    car_bottom_y: float = 0.0  # bbox 하단 y (진단용. 트리거에는 안 쓴다)
+    car_h: float = 0.0
+    # ↑ bbox 높이(px). **회피 트리거의 거리 판단**에 쓴다.
+    #   cone_max_h 와 같은 이유다(위 참고): 하단 y 는 카메라 피치·노면
+    #   기울기에 흔들리고 차가 화면 아래로 잘리면 오히려 작아진다.
+    #   높이는 거의 순수하게 거리의 함수다.
     car_conf: float = 0.0
 
 
@@ -103,10 +108,18 @@ def extract(result, names, width, height, dashed_conf, solid_conf,
                 det.cone_near_y = max(det.cone_near_y, y2)
                 det.cone_max_h = max(det.cone_max_h, y2 - y1)
         elif cls in CAR_NAMES:
+            # 방해차량은 **항상 한 대**다(사용자 확인 2026-08-22). 여러 박스가
+            # 나오면 conf 가 가장 높은 것 하나만 남긴다 — 원래 규칙 그대로다.
+            #
+            # ※ 한때 "높이가 가장 큰 것"으로 바꿨다가 되돌렸다. 근거로 삼았던
+            #   두 박스가 같은 프레임의 중복 검출이 아니라 **서로 다른 시점의
+            #   사진**이었다. 한 대뿐이면 두 규칙은 같은 것을 고르므로, 검증된
+            #   쪽을 유지한다.
             if conf >= car_conf and conf > det.car_conf:
                 det.car_present = True
                 det.car_cx = (x1 + x2) / 2.0
                 det.car_bottom_y = y2
+                det.car_h = y2 - y1      # 회피 트리거의 거리 판단에 쓴다
                 det.car_conf = conf
 
     return det

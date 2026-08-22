@@ -80,8 +80,10 @@ import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from geometry_msgs.msg import Point
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Bool, Float32MultiArray
+from visualization_msgs.msg import Marker, MarkerArray
 
 from my_obstacle import geometry as geo
 
@@ -98,6 +100,12 @@ class RubberconeNode(Node):
         #   곳에서도 차가 라이다 명령대로 움직인다.
         self.declare_parameter('drive_topic', 'cone_cmd')
         self.declare_parameter('debug_topic', '/rubbercone/debug_image')
+        # RViz 용 콘 마커. 콘 하나 = 큰 점 하나 (좌=파랑 / 우=빨강).
+        self.declare_parameter('cone_marker_topic', '/rubbercone/cones')
+        self.declare_parameter('cone_marker_size_m', 0.12)
+        # 디버그 영상에 ROI 스캔점(회색)을 함께 그릴지. 기본은 끈다 —
+        # 점이 깔리면 콘이 어디로 배정됐는지가 안 보인다.
+        self.declare_parameter('debug_show_scan_points', False)
         self.declare_parameter('zone_topic', '/cone_zone_active')
 
         self.declare_parameter('angle_offset_deg', 0.0)
@@ -109,24 +117,27 @@ class RubberconeNode(Node):
         self.declare_parameter('range_max_m', 1.40)
 
         # ---- 클러스터링 + 콘 모양 필터 ----
-        # 콘 표면 간 실제 간격은 0.434 - 0.10 = 0.334m 라 0.15 는 안전하다.
+        # 콘 표면 간 실제 간격은 0.425 - 0.10 = 0.325m 라 0.15 는 안전하다.
         self.declare_parameter('cluster_gap_m', 0.15)
         self.declare_parameter('cluster_min_points', 2)
         # 콘 하나의 span 은 0.10m. 옛 0.4 는 벽 조각을 콘으로 통과시켰다.
         self.declare_parameter('cluster_max_span_m', 0.20)
-        # 반드시 콘 간격 0.434 보다 작아야 한다 (안 그러면 이웃 콘이 병합된다).
+        # 반드시 콘 간격 0.425 보다 작아야 한다 (안 그러면 이웃 콘이 병합된다).
         self.declare_parameter('cone_merge_dist_m', 0.20)
 
         # ---- 좌/우 사슬 ----
-        # 0.434(콘 간격) < 0.60 < 0.80(복도 폭). 곡률과 무관하게 성립한다.
+        # 0.425(콘 간격) < 0.60 < 0.80(복도 폭). 곡률과 무관하게 성립한다.
         self.declare_parameter('cone_chain_max_dist_m', 0.60)
         self.declare_parameter('chain_extend_m', 0.55)
         self.declare_parameter('chain_reassign_dist_m', 0.30)
         self.declare_parameter('chain_min_cones', 2)
 
         # ---- 중심선 폭 검증 ----
-        self.declare_parameter('min_gap_m', 0.60)
-        self.declare_parameter('max_gap_m', 1.00)
+        self.declare_parameter('min_gap_m', 0.70)
+        self.declare_parameter('max_gap_m', 0.82)
+        # 좌우 대응이 벽 접선과 이루는 |cos| 상한. 같은 벽 콘끼리 짝지어지는
+        # 것을 거리가 아니라 **방향**으로 막는다 (geometry.centerline 참고).
+        self.declare_parameter('centerline_max_tangent_cos', 0.5)
         self.declare_parameter('single_side_offset_m', 0.40)   # = 복도폭/2
 
         # ---- Pure Pursuit ----
@@ -147,6 +158,9 @@ class RubberconeNode(Node):
         # ---- 속도 ----
         self.declare_parameter('base_speed', 6.0)
         self.declare_parameter('min_speed_ratio', 0.4)
+        # ★ 절대 하한 (2026-08-22). 비율만으로는 **모터 데드밴드 아래**로
+        #   떨어진다 — 아래 scan_callback 의 clamp 주석 참고.
+        self.declare_parameter('min_speed', 5.0)
         self.declare_parameter('lost_speed_ratio', 0.7)
 
         # ---- Follow-the-Gap 폴백 ----
@@ -190,6 +204,7 @@ class RubberconeNode(Node):
         self.chain_min_cones = p('chain_min_cones').value
 
         self.min_gap_m = p('min_gap_m').value
+        self.centerline_max_tangent_cos = p('centerline_max_tangent_cos').value
         self.max_gap_m = p('max_gap_m').value
         self.single_side_offset_m = p('single_side_offset_m').value
 
@@ -206,6 +221,7 @@ class RubberconeNode(Node):
 
         self.base_speed = p('base_speed').value
         self.min_speed_ratio = p('min_speed_ratio').value
+        self.min_speed = p('min_speed').value
         self.lost_speed_ratio = p('lost_speed_ratio').value
 
         self.car_width = p('car_width_m').value
@@ -220,6 +236,12 @@ class RubberconeNode(Node):
         self.zone_point_threshold = p('zone_point_threshold').value
         self.zone_enter_frames = p('zone_enter_frames').value
         self.zone_exit_frames = p('zone_exit_frames').value
+
+        self.cone_marker_size = p('cone_marker_size_m').value
+        self.debug_show_scan_points = p('debug_show_scan_points').value
+        # 마커를 스캔과 **같은 프레임**으로 낸다. 그러면 /viz/scan_cloud 가
+        # 제대로 보이는 환경이면 새 TF 없이 그대로 겹쳐 보인다.
+        self._scan_frame = 'laser_frame'
 
         self.bridge = CvBridge()
         self.smoothed_y = None
@@ -246,6 +268,8 @@ class RubberconeNode(Node):
         self.drive_pub = self.create_publisher(Float32MultiArray, self.drive_topic, 1)
         self.debug_pub = self.create_publisher(Image, self.debug_topic, 10)
         self.zone_pub = self.create_publisher(Bool, self.zone_topic, 10)
+        self.cone_marker_pub = self.create_publisher(
+            MarkerArray, p('cone_marker_topic').value, 10)
 
         self.get_logger().info(
             'rubbercone_node started. scan: %s -> drive: %s (mode=%s, axle=%.2fm)'
@@ -347,7 +371,8 @@ class RubberconeNode(Node):
 
         if left and right:
             path = geo.centerline(left, right, self.min_gap_m,
-                                  self.max_gap_m, self.chain_extend)
+                                  self.max_gap_m, self.chain_extend,
+                                  self.centerline_max_tangent_cos)
             if path:
                 return path, left, right, 'center'
 
@@ -471,6 +496,7 @@ class RubberconeNode(Node):
 
     # ==================== 메인 콜백 ====================
     def scan_callback(self, msg: LaserScan):
+        self._scan_frame = msg.header.frame_id or self._scan_frame
         all_points = self._scan_to_points(msg)
         roi_points = self._apply_roi(all_points)
         cones = self._cluster_and_filter(roi_points)
@@ -540,6 +566,37 @@ class RubberconeNode(Node):
         steer_ratio = abs(angle) / self.angle_limit if self.angle_limit > 0 else 0.0
         speed = speed * max(self.min_speed_ratio, 1.0 - steer_ratio)
 
+        # ★ 절대 하한 (2026-08-22) — **"멈춘 뒤 다시 안 나가던" 원인.**
+        #
+        #   비율 감속만 두면 명령이 센서리스 BLDC 의 데드밴드 아래로 내려간다.
+        #   이 차량 상수(speed_weight 0.08 x speed_to_erpm_gain 4614)로
+        #   speed 4.06 = 1500 ERPM 이 그 경계인데:
+        #
+        #       조향  0도 -> 6.00 (2215 ERPM)  돈다
+        #       조향 10도 -> 4.00 (1476 ERPM)  ← 여기서부터 안 돈다
+        #       조향 20도 -> 2.40 ( 886 ERPM)  안 돈다
+        #       FTG 폴백이면 x0.7 이라 더 낮다 (조향 5도에 이미 1292)
+        #
+        #   라바콘 복도에서 조향 10도는 예사다. 그래서 구간 대부분을
+        #   데드밴드 안에서 명령하고 있었다. 게다가 **한 번 서면 스캔이
+        #   안 바뀌므로 조향도 그대로 -> 속도도 그대로**라 영영 못 나간다.
+        #   소프트웨어 래치가 아니라 물리적 래치였다.
+        #
+        #   driver_node 의 speed.min(7.0)은 **차선 주행 경로에만** 걸린다
+        #   (longitudinal.py). 콘 구간 명령은 SpeedLimiter 를 그냥 통과하고,
+        #   그 kick 도 min(target, kick) 이라 목표가 낮으면 못 끌어올린다.
+        #   그래서 하한은 여기, 명령을 만드는 자리에 있어야 한다.
+        #
+        #   ⚠️ 이 하한이 걸리면 min_speed_ratio 는 사실상 죽는다
+        #      (base 6.0 / min_speed 5.0 이면 비율은 1.00~0.833 구간만 산다).
+        #      데드밴드 아래로는 "천천히"가 존재하지 않으므로 이게 맞다 —
+        #      2.4 를 명령하는 것은 느리게 가는 게 아니라 서는 것이다.
+        #   ⚠️ 5.0 = 1846 ERPM. 조향 부하까지 걸린 상태에서 이것으로도
+        #      끊기면 7.0(2584 ERPM, 2026-08-19 차선 곡선에서 검증된 값)까지
+        #      올려야 하고, 그러면 base_speed 도 그 이상이어야 의미가 있다.
+        if speed > 0.0:
+            speed = max(speed, self.min_speed)
+
         self.drive_pub.publish(Float32MultiArray(data=[angle, float(speed)]))
 
         if clamped:
@@ -551,8 +608,49 @@ class RubberconeNode(Node):
                 throttle_duration_sec=2.0)
 
         self._update_zone(all_points)
+        self._publish_cone_markers(left, right)
         self._publish_debug(roi_points, left, right, path, target, angle,
                             source, eff_ld)
+
+    # ==================== RViz 콘 마커 ====================
+    def _publish_cone_markers(self, left, right):
+        """콘 하나 = 큰 점 하나. 좌측 사슬 파랑 / 우측 사슬 빨강.
+
+        원본 스캔점은 내지 않는다 — 라바콘 구간에서 알고 싶은 건
+        "점이 어디 있나"가 아니라 **"어느 콘이 어느 벽으로 배정됐나"** 다.
+        점이 깔려 있으면 그 배정이 안 보인다. (전체 스캔을 보고 싶으면
+        viz_node 의 /viz/scan_cloud 를 켜면 된다 — 구간 밖에서는 계속 나온다.)
+
+        SPHERE_LIST 를 쓰는 이유: 콘 개수만큼 마커를 만들면 개수가 줄었을 때
+        옛 마커가 화면에 남는다(id 관리 필요). 리스트 하나면 점 목록만
+        갈아끼우면 되고, 비면 DELETE 한 번으로 깨끗이 사라진다.
+
+        프레임은 스캔과 같은 것을 쓴다 — 새 TF 를 요구하지 않는다.
+        """
+        arr = MarkerArray()
+        size = self.cone_marker_size
+        for mid, chain, ns, rgb in ((0, left, 'cones_left', (0.1, 0.4, 1.0)),
+                                    (1, right, 'cones_right', (1.0, 0.1, 0.1))):
+            m = Marker()
+            m.header.frame_id = self._scan_frame
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = ns
+            m.id = mid
+            m.type = Marker.SPHERE_LIST
+            m.pose.orientation.w = 1.0
+            if chain:
+                m.action = Marker.ADD
+                m.scale.x = m.scale.y = m.scale.z = size
+                m.color.r, m.color.g, m.color.b = rgb
+                m.color.a = 1.0
+                for (x, y) in chain:
+                    pt = Point()
+                    pt.x, pt.y, pt.z = float(x), float(y), 0.0
+                    m.points.append(pt)
+            else:
+                m.action = Marker.DELETE
+            arr.markers.append(m)
+        self.cone_marker_pub.publish(arr)
 
     # ==================== 디버그 시각화 ====================
     def _publish_debug(self, roi_points, left, right, path, target, angle,
@@ -571,19 +669,25 @@ class RubberconeNode(Node):
         # ROI 경계 (직사각형 + 거리 상한)
         cv2.circle(img, origin, int(self.range_max * scale), (60, 60, 0), 1)
 
-        for (x, y) in roi_points:
-            px, py = to_px(x, y)
-            if 0 <= px < size and 0 <= py < size:
-                img[py, px] = (90, 90, 90)
+        # ROI 스캔점은 기본으로 **그리지 않는다** (debug_show_scan_points).
+        # 점이 깔리면 콘이 어느 벽으로 배정됐는지가 안 보인다 — 이 화면의
+        # 목적은 스캔이 아니라 그 배정이다.
+        if self.debug_show_scan_points:
+            for (x, y) in roi_points:
+                px, py = to_px(x, y)
+                if 0 <= px < size and 0 <= py < size:
+                    img[py, px] = (90, 90, 90)
 
         def draw_chain(chain, color):
+            # 콘 하나 = 큰 점 하나. RViz 마커(_publish_cone_markers)와 같은
+            # 색 규약을 쓴다 — 두 화면을 번갈아 봐도 좌우가 안 헷갈리게.
             for k, (x, y) in enumerate(chain):
-                cv2.circle(img, to_px(x, y), 7, color, -1)
+                cv2.circle(img, to_px(x, y), 11, color, -1)
                 if k:
                     cv2.line(img, to_px(*chain[k - 1]), to_px(x, y), color, 2)
 
-        draw_chain(left, (255, 0, 0))     # 파랑 = 좌측 사슬
-        draw_chain(right, (0, 255, 255))  # 노랑 = 우측 사슬
+        draw_chain(left, (255, 0, 0))     # 파랑 = 좌측 사슬 (BGR)
+        draw_chain(right, (0, 0, 255))    # 빨강 = 우측 사슬
 
         for k, (x, y) in enumerate(path):  # 초록 = 중심선
             cv2.circle(img, to_px(x, y), 3, (0, 200, 0), -1)

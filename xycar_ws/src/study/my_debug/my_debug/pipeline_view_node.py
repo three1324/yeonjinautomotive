@@ -104,12 +104,15 @@ class PipelineViewNode(Node):
         if s.get("car_present"):
             cx = int(round(s.get("car_cx", 0.0)))
             by = int(round(s.get("car_bottom_y", 0.0)))
+            ch = s.get("car_h", 0.0)
             if 0 <= cx < w:
                 cv2.line(frame, (cx, 0), (cx, h), (120, 120, 120), 1, cv2.LINE_AA)
             if 0 <= by < h:
                 cv2.line(frame, (cx - 25, by), (cx + 25, by), (120, 120, 120), 1,
                          cv2.LINE_AA)
-            cv2.putText(frame, f"car cx{cx} y{by}", (max(4, cx - 45), h - 8),
+            # 높이(h)가 트리거 기준이다 — 화면에서 바로 읽혀야 "왜 아직
+            # 안 피하지"를 가를 수 있다.
+            cv2.putText(frame, f"car cx{cx} h{ch:.0f}", (max(4, cx - 45), h - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1,
                         cv2.LINE_AA)
 
@@ -216,7 +219,7 @@ class PipelineViewNode(Node):
                     "6) OVERTAKE  idle  "
                     + (f"BLOCKED {blocked:.1f}s  " if blocked > 0 else "")
                     + (f"car seen cx{s.get('car_cx', 0):.0f} "
-                       f"y{s.get('car_bottom_y', 0):.0f}"
+                       f"h{s.get('car_h', 0):.0f}"
                        if s.get('car_present') else "no car"))
                 ot_color = (140, 140, 140)
             cv2.putText(bar, ot_line, (10, 124), cv2.FONT_HERSHEY_SIMPLEX,

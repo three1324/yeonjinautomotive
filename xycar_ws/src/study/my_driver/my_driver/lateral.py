@@ -45,8 +45,15 @@ class OvertakeBehavior:
 
     트리거 조건 (모두 만족해야 시작):
       - 카메라가 차량을 봤다 (라바콘이 아니라 차량이라는 건 YOLO만 안다)
-      - 그 차량이 충분히 가깝다 (bbox 하단 y가 임계 이상)
+      - 그 차량이 충분히 가깝다 (**bbox 높이**가 임계 이상)
       - 쿨다운 중이 아니다
+
+    ★ [2026-08-22] 거리 판단을 **bbox 하단 y -> bbox 높이**로 바꿨다.
+      "보이자마자 피한다"가 문제였다. 하단 y 는 거리뿐 아니라 카메라 피치와
+      노면 기울기에 흔들리고, 차가 화면 아래로 잘리면 오히려 **작아진다**.
+      높이는 거의 순수하게 거리의 함수다 — 라바콘 구간 진입 트리거가
+      cone_max_h 를 쓰는 것과 정확히 같은 이유다(cone_zone.py 참고).
+      순서도 명확해졌다: **높이 임계 충족 -> 피할 쪽 결정 -> 기동 시작.**
 
     ────────────────────────────────────────────────────────────────
     왜 라이다를 뺐나 (2026-08-19 실차 결정)
@@ -75,13 +82,13 @@ class OvertakeBehavior:
     목표가 따라 흔들리면 조향이 진동하기 때문이다.
     """
 
-    def __init__(self, shift_px, trigger_bottom_y,
+    def __init__(self, shift_px, trigger_height_px,
                  shift_sec, pass_sec, return_sec,
                  cooldown_sec=1.0, pass_exit_ratio=0.85,
                  pass_exit_cx_ratio=0.85, lost_hold_sec=1.0, shift_scale=0.5, overshoot_sec=0.5,
                  overshoot_scale=1.0):
         self.shift_px = shift_px                    # 반폭 미학습 시 폴백값 (픽셀)
-        self.trigger_bottom_y = trigger_bottom_y    # 차량 bbox 하단 y 임계 (클수록 가까움)
+        self.trigger_height_px = trigger_height_px  # 차량 bbox 높이 임계 (클수록 가까움)
         # 추월 후 중앙을 지나 반대쪽으로 더 머물 시간과 그 크기 배율.
         # 0 으로 두면 예전처럼 중앙에서 바로 끝난다.
         self.overshoot_sec = overshoot_sec
@@ -92,7 +99,7 @@ class OvertakeBehavior:
         self.pass_sec = pass_sec                    # PASS 유지의 **상한** (안전장치)
         self.return_sec = return_sec
         self.cooldown_sec = cooldown_sec            # 복귀 후 재발동 금지 시간
-        # PASS 탈출용 히스테리시스. bottom_y 가 trigger 의 이 배율 아래로 내려가면
+        # PASS 탈출용 히스테리시스. **bbox 높이**가 trigger 의 이 배율 아래로 내려가면
         # "지나쳤다"고 본다. 1.0 으로 두면 임계 근처에서 진입/이탈이 떨린다.
         self.pass_exit_ratio = pass_exit_ratio
         # 차량이 화면 가장자리로 밀려나면 옆으로 지나친 것이다.
@@ -100,7 +107,10 @@ class OvertakeBehavior:
         # [실측 2026-08-19] 테스트영상 f2741~2811 구간에서 cx 가 440->612 로
         # 이동하는 동안 bottom_y 는 계속 커져(302->439) "멀어짐" 조건이 걸리지
         # 않았고, pass_sec 상한(1.5s)으로만 복귀했다. 옆을 스쳐 지나가는 차는
-        # 가까워지면서 화면 밖으로 나가므로 bottom_y 만으로는 못 잡는다.
+        # **가까워지면서** 화면 밖으로 나가므로 거리 조건 하나로는 못 잡는다.
+        # 이 관찰은 트리거를 bbox 높이로 바꾼 지금도 그대로다 — 스쳐 지나가는
+        # 동안 높이는 오히려 커지므로 receding 조건이 안 걸린다. 그래서 이
+        # cx 조건이 여전히 필요하다.
         self.pass_exit_cx_ratio = pass_exit_cx_ratio
         # 차량이 **안 보이는 상태가 이만큼 이어져야** 복귀한다 (2026-08-21).
         # 한 프레임만 놓쳐도 복귀하면, 옆으로 벌린 순간 방해차량이 화면 밖으로
@@ -223,7 +233,7 @@ class OvertakeBehavior:
         base = half_near / 2.0 if half_near > 0.0 else self.shift_px
         return base * self.shift_scale
 
-    def update(self, dt, car_present, car_cx, car_bottom_y,
+    def update(self, dt, car_present, car_cx, car_h,
                image_width, half_near=0.0):
         """회피로 인한 목표 오프셋 보정량(픽셀)을 반환한다. 평소 0.
 
@@ -234,7 +244,9 @@ class OvertakeBehavior:
                 self._cooldown = max(0.0, self._cooldown - dt)
                 return 0.0
 
-            if car_present and car_bottom_y >= self.trigger_bottom_y:
+            # ① 거리 조건: bbox 높이가 임계 이상인가 (= 충분히 가까운가)
+            if car_present and car_h >= self.trigger_height_px:
+                # ② 그 시점에 피할 쪽을 정하고 ③ 기동을 시작한다.
                 d = self._pick_side(car_cx, image_width)
                 self._dir = d
                 self._car_side = -d      # 피하는 쪽의 반대 = 차가 있던 쪽
@@ -245,7 +257,8 @@ class OvertakeBehavior:
                 src = "half/2" if half_near > 0.0 else "shift_px(fallback)"
                 self.last_reason = (
                     f"start: car {'left' if d > 0 else 'right'}"
-                    f"(cx{car_cx:.0f}) -> avoid {'right' if d > 0 else 'left'} "
+                    f"(cx{car_cx:.0f} h{car_h:.0f}) -> "
+                    f"avoid {'right' if d > 0 else 'left'} "
                     f"{self._amount:.0f}px[{src}]")
             return 0.0
 
@@ -275,8 +288,8 @@ class OvertakeBehavior:
             elif not car_present:
                 # 아직 유지시간 중 — 벌린 상태를 그대로 유지한다.
                 return self._offset()
-            elif car_bottom_y < self.trigger_bottom_y * self.pass_exit_ratio:
-                reason = f"car receding(y{car_bottom_y:.0f})"
+            elif car_h < self.trigger_height_px * self.pass_exit_ratio:
+                reason = f"car receding(h{car_h:.0f})"
             elif (image_width > 0
                   and abs(car_cx - image_width / 2.0) / (image_width / 2.0)
                   > self.pass_exit_cx_ratio):
@@ -359,7 +372,7 @@ class LateralPlanner:
             # 회피는 그걸 쓰지 않는다 (OvertakeBehavior 주석 참고).
             target += self.overtake.update(
                 dt,
-                obs.car_present, obs.car_cx, obs.car_bottom_y,
+                obs.car_present, obs.car_cx, obs.car_h,
                 image_width,
                 half_near=half_near,
             )

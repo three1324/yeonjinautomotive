@@ -6,7 +6,8 @@
 구독:
     /lane      Float32MultiArray [offset_near, offset_far, valid, quality]
     /light     Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT
-    /objects   Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y, cone_max_h]
+    /objects   Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y,
+                                  cone_max_h, car_h]
     /cone_cmd  Float32MultiArray [angle, speed]  라바콘 구간 전담 노드의 명령
     /cone_zone_active Bool                       그 노드의 구간 판정 (진단용, 제어 미사용)
 
@@ -129,7 +130,8 @@ class Obs:
     cone_near_y: float = 0.0
     car_present: bool = False
     car_cx: float = 0.0
-    car_bottom_y: float = 0.0
+    car_bottom_y: float = 0.0   # 진단용. 회피 트리거에는 안 쓴다
+    car_h: float = 0.0          # bbox 높이(px) — 회피 트리거의 거리 판단
 
     cone_max_h: float = 0.0   # 가장 큰 콘 bbox 높이(px). 구간 진입 거리 판단용
 
@@ -186,7 +188,7 @@ class DriverNode(Node):
                 ("cone_zone.enter_min_size_px", 0.0),
                 # ↑ 그 콘이 **충분히 가까워야** 진입한다 (가장 큰 콘 bbox 높이).
                 #   개수만 보면 직선 끝에서 콘 무리가 보이자마자 전환된다.
-                ("cone_zone.exit_n", 2),       # 이 개수 이하로 떨어지면 이탈 후보
+                ("cone_zone.exit_n", 4),       # 이 개수 이하로 떨어지면 이탈 후보
                 ("cone_zone.exit_hold_sec", 1.5),  # 이탈 후보가 이만큼 지속돼야 실제 이탈
                 # rubbercone_node 의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
                 # 그 노드는 /scan 주기(약 10Hz)로 발행하므로 0.5s 면 5프레임 여유.
@@ -197,7 +199,7 @@ class DriverNode(Node):
                 ("lateral.shift_scale", 0.5),
                 ("lateral.overshoot_sec", 0.5),
                 ("lateral.overshoot_scale", 1.0),
-                ("lateral.trigger_bottom_y", 300.0),
+                ("lateral.trigger_height_px", 67.0),
                 ("lateral.shift_sec", 0.8),
                 ("lateral.pass_sec", 1.5),
                 ("lateral.return_sec", 1.0),
@@ -262,7 +264,7 @@ class DriverNode(Node):
                 shift_scale=g("lateral.shift_scale").value,
                 overshoot_sec=g("lateral.overshoot_sec").value,
                 overshoot_scale=g("lateral.overshoot_scale").value,
-                trigger_bottom_y=g("lateral.trigger_bottom_y").value,
+                trigger_height_px=g("lateral.trigger_height_px").value,
                 shift_sec=g("lateral.shift_sec").value,
                 pass_sec=g("lateral.pass_sec").value,
                 return_sec=g("lateral.return_sec").value,
@@ -390,6 +392,10 @@ class DriverNode(Node):
         # 않는다 — 옛 perception_node 와 섞어 쓰면 구간에 아예 못 들어간다.
         if len(msg.data) >= 6:
             self.obs.cone_max_h = msg.data[5]
+        # 차량 bbox 높이도 뒤에 붙은 확장 필드다. 없으면 0.0 이라 회피가
+        # **아예 안 걸린다** — 옛 perception_node 와 섞어 쓰면 그렇게 된다.
+        if len(msg.data) >= 7:
+            self.obs.car_h = msg.data[6]
 
 
     def on_cone_cmd(self, msg):
@@ -691,6 +697,7 @@ class DriverNode(Node):
             "car_present": bool(self.obs.car_present),
             "car_cx": round(float(self.obs.car_cx), 1),
             "car_bottom_y": round(float(self.obs.car_bottom_y), 1),
+            "car_h": round(float(self.obs.car_h), 1),
             # 좌회전 직후 회피 차단이 걸려 있는지. 0 이면 평소대로 회피한다.
             # 이게 안 보이면 "왜 안 피하지"를 화면에서 못 가른다.
             "ot_block": round(self._overtake_block_left, 1),

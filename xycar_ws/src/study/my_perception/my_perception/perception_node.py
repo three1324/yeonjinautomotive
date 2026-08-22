@@ -11,7 +11,8 @@
              half_* 는 학습된 트랙 반폭(px). my_driver 가 회피 목표
              (트랙중앙 ± 반폭/2 = 트랙 반쪽의 중앙)를 만드는 데 쓴다. 0이면 미학습.
     /light   Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT (투표 확정값)
-    /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y, cone_max_h]
+    /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y,
+                                cone_max_h, car_h]
     /debug_image Image         publish_debug_image=true 일 때만. YOLO 박스 + 차선 시각화
                  (my_debug/pipeline_view_node 전용, 기본 off — CPU 추론 병목 때문)
 
@@ -260,6 +261,9 @@ class PerceptionNode(Node):
             # 진입 트리거의 "충분히 가까운가" 판단에 쓴다. 뒤에 붙였으므로
             # 옛 driver_node 와 섞어 써도 길이 검사로 무시된다.
             float(det.cone_max_h),
+            # [확장 필드] 방해차량 bbox 높이(px). 회피 트리거의 거리 판단.
+            # 하단 y(위 5번째)는 진단용으로만 남긴다 — detect.py 주석 참고.
+            float(det.car_h),
         ]))
 
         if self.publish_debug_image:
