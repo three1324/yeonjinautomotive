@@ -88,7 +88,8 @@ from std_msgs.msg import Bool, Float32MultiArray, Int32, String
 
 from my_driver.control import SpeedLimiter, SteeringController
 from my_driver.cone_zone import ConeZoneDetector
-from my_driver.fsm import DriveFSM, ShortcutPhase, State
+from my_driver.fsm import LIGHT_LEFT, DriveFSM, ShortcutPhase, State
+from my_driver.left_drive import TimedLeftDrive
 from my_driver.lateral import LateralPlanner, OvertakeBehavior
 from my_driver.longitudinal import LongitudinalPlanner
 
@@ -180,15 +181,31 @@ class DriverNode(Node):
                 # 화면이 평소와 달라 YOLO 가 차량을 오검출하기 쉬운데, 그때
                 # 회피가 걸리면 갓 들어온 길에서 옆으로 벌린 채 달린다.
                 ("shortcut.overtake_block_sec", 20.0),
+                # ── 좌회전 하드코딩 주행 (left_drive.TimedLeftDrive) ──
+                # [2026-08-22] race_control 에서 그대로 이식했다. fsm 의
+                # SHORTCUT 과 같은 일을 하므로 **둘 중 하나만 켠다** —
+                # left_drive.py 상단 표 참고. 값은 원본(mission.yaml) 그대로다.
+                ("left.hardcoded_enabled", True),
+                ("left.hardcoded_speed", 12.0),
+                ("left.hardcoded_straight_seconds", 1.32),
+                ("left.hardcoded_turn_seconds", 1.20),
+                ("left.hardcoded_steer_deg", 20.0),
+                # LEFT 가 이 프레임 수만큼 연속으로 안 보여야 주행을 시작한다.
+                ("left.clear_frames", 3),
+                # LEFT 확정에 필요한 연속 프레임. 원본은 신호 투표기가 따로
+                # 했지만 여기서는 /light 확정값을 세는 것으로 같은 일을 한다.
+                ("left.confirm_frames", 5),
+                ("left.overtake_block_enabled", True),
+                ("left.overtake_block_seconds", 15.0),
                 ("fsm.auto_start", False),
                 # 라바콘 구간 — **판정은 카메라(YOLO 콘 개수), 주행은 rubbercone_node**.
                 # 판정을 라이다에 맡겼더니 콘이 없는 곳(벽·기둥)에서도 구간으로
                 # 잡혀 제어권이 넘어갔다 (2026-08-19 2차 실차). cone_zone.py 참고.
-                ("cone_zone.enter_n", 8),      # 콘 이 개수 이상 보이면 진입 후보
+                ("cone_zone.enter_n", 9),      # 콘 이 개수 이상 보이면 진입 후보
                 ("cone_zone.enter_min_size_px", 0.0),
                 # ↑ 그 콘이 **충분히 가까워야** 진입한다 (가장 큰 콘 bbox 높이).
                 #   개수만 보면 직선 끝에서 콘 무리가 보이자마자 전환된다.
-                ("cone_zone.exit_n", 4),       # 이 개수 이하로 떨어지면 이탈 후보
+                ("cone_zone.exit_n", 6),       # 이 개수 이하로 떨어지면 이탈 후보
                 ("cone_zone.exit_hold_sec", 1.5),  # 이탈 후보가 이만큼 지속돼야 실제 이탈
                 # rubbercone_node 의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
                 # 그 노드는 /scan 주기(약 10Hz)로 발행하므로 0.5s 면 5프레임 여유.
@@ -244,6 +261,21 @@ class DriverNode(Node):
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
             auto_start=g("fsm.auto_start").value,
         )
+        self.left_enabled = bool(g("left.hardcoded_enabled").value)
+        self.timed_left = TimedLeftDrive(
+            g("left.hardcoded_straight_seconds").value,
+            g("left.hardcoded_turn_seconds").value,
+        )
+        self.left_speed = float(g("left.hardcoded_speed").value)
+        self.left_steer_deg = float(g("left.hardcoded_steer_deg").value)
+        self.left_clear_frames = int(g("left.clear_frames").value)
+        self.left_confirm_frames = int(g("left.confirm_frames").value)
+        self.left_block_enabled = bool(g("left.overtake_block_enabled").value)
+        self.left_block_sec = float(g("left.overtake_block_seconds").value)
+        # 원본의 left_trigger_armed 와 같다 — 표지 한 번에 한 번만 발동한다.
+        self.left_trigger_armed = True
+        self._left_confirm = 0          # LEFT 연속 확정 프레임
+        self._left_missing = 0          # LEFT 연속 소실 프레임
         self.cone_zone = ConeZoneDetector(
             enter_n=g("cone_zone.enter_n").value,
             enter_min_size_px=g("cone_zone.enter_min_size_px").value,
@@ -415,6 +447,8 @@ class DriverNode(Node):
         self._last_tick = now
         if dt <= 0.0:
             return
+        # TimedLeftDrive 는 초 단위 시각을 쓴다 (원본과 같은 규약).
+        now_sec = now.nanoseconds / 1e9
 
         # 라바콘 구간 판정은 **주행 여부와 무관하게 항상 돌린다.**
         # 아래의 조기 return 들(disabled / stale / 신호 대기) 뒤에 두면,
@@ -450,6 +484,14 @@ class DriverNode(Node):
 
         # dt 를 넘겨야 SHORTCUT 위상 시간(ARM/TURN_IN)이 흘러간다.
         state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
+
+        # ── 좌회전 하드코딩 주행 (left_drive.TimedLeftDrive) ──
+        # race_control 이식본. fsm 의 SHORTCUT 과 둘 중 하나만 켠다.
+        if self.left_enabled:
+            self._update_timed_left(now_sec, state, in_cone_zone)
+            if self.timed_left.driving:
+                self._drive_timed_left(dt, state)
+                return
 
         # 좌회전을 막 끝냈다 -> 회피 차단 시작.
         if self._prev_fsm_state is State.SHORTCUT and state is not State.SHORTCUT:
@@ -575,6 +617,111 @@ class DriverNode(Node):
         self._publish(angle, speed)
         self._log(state, angle, speed, self.longitudinal.last_reason)
         self._pub_debug(state.value, angle, speed, self.longitudinal.last_reason)
+
+    def _update_timed_left(self, now_sec, state, in_cone_zone):
+        """LEFT 표지를 보고 하드코딩 좌회전을 걸고, 표지가 사라지면 시작한다.
+
+        race_control/controller_node.py 의 트리거를 그대로 옮겼다:
+
+          1) LEFT 가 confirm_frames 만큼 연속 확정  -> arm()  (WAIT_CLEAR)
+             한 번 걸리면 left_trigger_armed 를 내려 **표지 하나에 한 번만**
+             발동한다. 화면에 LEFT 가 계속 남아 있는 동안 반복 실행되는 것을
+             막으려는 것이다.
+          2) LEFT 가 clear_frames 만큼 연속으로 안 보임
+             -> begin_after_signal()  (STRAIGHT 시작, 속도 고정)
+             동시에 트리거를 다시 무장한다.
+          3) TURN -> DONE 으로 넘어가는 순간 회피를 일정 시간 차단한다.
+             분기 직후 지름길은 화면이 평소와 달라 차량 오검출이 잦은데,
+             그때 회피가 걸리면 갓 들어온 길에서 옆으로 벌린 채 달린다.
+
+        ※ 원본은 신호 투표기(signal_votes)가 확정을 맡았지만, 여기서는
+          /light 가 이미 light_vote 를 거친 확정값이라 그 값을 센다.
+        """
+        is_left = (self.obs.light == LIGHT_LEFT)
+
+        # (1) 발동
+        if is_left:
+            self._left_confirm += 1
+        else:
+            self._left_confirm = 0
+        if (self._left_confirm >= self.left_confirm_frames
+                and self.left_trigger_armed
+                and state is not State.WAIT_LIGHT
+                and not in_cone_zone):
+            if self.timed_left.arm():
+                self.left_trigger_armed = False
+                self.get_logger().info(
+                    f"LEFT 확정 x{self._left_confirm} — 표지가 사라지면 "
+                    f"좌회전 시작 (직진 {self.timed_left.straight_seconds:.2f}s "
+                    f"-> 조향 {self.left_steer_deg:+.0f} "
+                    f"{self.timed_left.turn_seconds:.2f}s)")
+
+        # (2) 표지 소실 -> 시작
+        if is_left:
+            self._left_missing = 0
+        else:
+            self._left_missing += 1
+            if (self._left_missing >= self.left_clear_frames
+                    and self.timed_left.phase == TimedLeftDrive.WAIT_CLEAR):
+                self.timed_left.begin_after_signal(now_sec, self.left_speed)
+                self.get_logger().info(
+                    f"LEFT 소실 x{self._left_missing} — 좌회전 주행 시작 "
+                    f"(speed {self.left_speed:.0f})")
+            if self._left_missing >= self.left_clear_frames:
+                self.left_trigger_armed = True
+
+        # (3) 위상 진행 + 완료 시 회피 차단
+        previous = self.timed_left.phase
+        phase = self.timed_left.update(now_sec)
+        if previous != phase and phase != TimedLeftDrive.IDLE:
+            self.get_logger().info(
+                f"좌회전 위상 {TimedLeftDrive.NAMES[previous]} -> "
+                f"{TimedLeftDrive.NAMES[phase]}")
+        if (previous == TimedLeftDrive.TURN and phase == TimedLeftDrive.DONE
+                and self.left_block_enabled):
+            self._overtake_block_left = max(
+                self._overtake_block_left, self.left_block_sec)
+            self.get_logger().info(
+                f"좌회전 완료 — 회피 {self.left_block_sec:.0f}초 차단")
+
+        # 라바콘 구간이 잡히면 좌회전보다 우선한다 (원본과 같은 우선순위).
+        if in_cone_zone and self.timed_left.active:
+            self.timed_left.cancel()
+            self.get_logger().warn("라바콘 구간 진입 — 좌회전 취소")
+
+    def _drive_timed_left(self, dt, state):
+        """좌회전 하드코딩 주행의 STRAIGHT / TURN 위상을 실행한다.
+
+        STRAIGHT : 평소대로 **차선을 따라간다.** 속도만 고정값이다.
+                   분기점까지 가는 구간이라 차선이 아직 멀쩡하다.
+        TURN     : 차선을 안 보고 고정 조향각을 따라간다. 다만 sync() 로
+                   즉시 꺾는 것이 아니라 follow_external() 로 **변화율 제한을
+                   통과**시킨다 — 원본이 그렇게 돼 있다.
+
+        속도는 둘 다 held_speed(시작 시점에 고정한 값)다. 같은 조향각이라도
+        속도가 다르면 회전 반경이 달라지기 때문이다. SpeedLimiter 는
+        통과시킨다 — 알고리즘이 아니라 하드웨어 보호다.
+        """
+        phase = self.timed_left.phase
+        if phase == TimedLeftDrive.STRAIGHT and self.obs.lane_valid:
+            angle = self.steering.update(
+                dt, self.obs.offset_near, self.obs.offset_far, 0.0,
+                self.timed_left.held_speed)
+            reason = "left_timed_straight"
+        else:
+            # TURN, 또는 STRAIGHT 인데 차선을 놓친 경우.
+            angle = self.steering.follow_external(dt, self.left_steer_deg)
+            reason = ("left_timed_turn" if phase == TimedLeftDrive.TURN
+                      else "left_timed_straight_lane_lost")
+        speed = self.speed_limiter.update(dt, self.timed_left.held_speed)
+
+        if self._last_source != reason:
+            self.get_logger().info(f"{reason} — angle {angle:+.1f} speed {speed:.1f}")
+            self._last_source = reason
+
+        self._publish(angle, speed)
+        self._log(state, angle, speed, reason)
+        self._pub_debug(state.value, angle, speed, reason)
 
     def _drive_shortcut_turn(self, dt, state):
         """좌회전 진입 — 고정 조향각 + 고정 속도. 인지는 안 본다.

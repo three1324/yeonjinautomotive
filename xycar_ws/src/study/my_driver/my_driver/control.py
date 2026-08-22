@@ -88,6 +88,27 @@ class SteeringController:
         self._cmd = _clamp(filtered, -self.angle_limit, self.angle_limit)
         return self._cmd
 
+    def follow_external(self, dt, target):
+        """바깥에서 준 목표 조향각을 **변화율 제한만 걸어** 따라간다.
+
+        [2026-08-22] race_control/control.py 에서 그대로 옮겼다. 좌회전
+        하드코딩 주행(left_drive.TimedLeftDrive)의 TURN 위상이 쓴다.
+
+        update() 와 다른 점: 차선 오차를 안 본다. 목표각이 이미 정해져
+        있으므로 P/D 계산 없이 rate limit 과 상한만 통과시킨다.
+
+        sync() 와 다른 점: sync 는 내부값을 **즉시** 그 각도로 맞추지만
+        이쪽은 dt 만큼씩 걸어간다. 급격한 조향 입력이 서보에 그대로 가는
+        것을 막으려는 것이다 — 원본이 그렇게 돼 있다.
+
+        미분항은 무효화한다. 외부 조향 중의 오차 변화는 의미가 없다.
+        """
+        target = _clamp(float(target), -self.angle_limit, self.angle_limit)
+        step = self.rate_limit * max(dt, 1e-3)
+        self._cmd = _clamp(target, self._cmd - step, self._cmd + step)
+        self._prev_err = None
+        return self._cmd
+
     def sync(self, angle):
         """다른 제어기가 조향을 잡고 있는 동안 내부 상태를 그 값에 맞춰둔다.
 
