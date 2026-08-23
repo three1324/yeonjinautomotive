@@ -88,11 +88,20 @@ class OvertakeBehavior:
     """
 
     def __init__(self, trigger_height_px, shift_left_px, shift_right_px,
-                 lost_hold_sec=2.0, cooldown_sec=1.0):
+                 lost_hold_sec=2.5, cooldown_sec=1.0,
+                 trigger_height_ionic_px=None):
         # 차량 bbox 높이 임계 (클수록 가까워야 발동). 거리 대용값이다 —
         # 하단 y 는 카메라 피치·노면 기울기에 흔들리지만 높이는 거의 순수하게
         # 거리의 함수다 (cone_zone 의 진입 크기 조건과 같은 근거).
-        self.trigger_height_px = trigger_height_px
+        #
+        # [2026-08-23] **모델별로 문턱을 나눈다.** 같은 거리라도 AvanteN 과
+        # ionic5 는 차체 크기가 달라 bbox 높이가 다르게 나온다. 문턱이 하나면
+        # 한쪽은 너무 늦게(=너무 가까워서) 발동하고 다른 쪽은 너무 이르게
+        # 발동한다. car_cls(1=AvanteN, 2=ionic5)로 갈라 쓴다.
+        self.trigger_height_px = trigger_height_px          # AvanteN / 미상
+        self.trigger_height_ionic_px = (
+            trigger_height_px if trigger_height_ionic_px is None
+            else trigger_height_ionic_px)                    # ionic5
         self.shift_left_px = shift_left_px      # 왼쪽으로 피할 때의 오프셋 크기
         self.shift_right_px = shift_right_px    # 오른쪽으로 피할 때
         # 차량이 **안 보이는 상태가 이만큼 이어져야** 트랙 중앙으로 되돌아간다.
@@ -186,18 +195,26 @@ class OvertakeBehavior:
         self._cooldown = self.cooldown_sec
         self.last_reason = f"{why} -> lane center (cooldown {self.cooldown_sec:.1f}s)"
 
-    def update(self, dt, car_present, car_cx, car_h, image_width):
+    def trigger_for(self, car_cls):
+        """이 모델에 쓸 bbox 높이 문턱(px). car_cls: 1=AvanteN, 2=ionic5."""
+        if int(car_cls) == 2:
+            return self.trigger_height_ionic_px
+        return self.trigger_height_px
+
+    def update(self, dt, car_present, car_cx, car_h, image_width, car_cls=0):
         """회피로 인한 목표 오프셋 보정량(픽셀)을 반환한다. 평소 0.
 
         인자에 라이다 값이 없다 — 의도적이다. 클래스 주석 참고.
+        car_cls 는 모델별 트리거 문턱을 고르는 데만 쓴다.
         """
         if self.phase is OvertakePhase.IDLE:
             if self._cooldown > 0.0:
                 self._cooldown = max(0.0, self._cooldown - dt)
                 return 0.0
 
-            # (1) 거리 조건: bbox 높이가 임계 이상인가 (= 충분히 가까운가)
-            if car_present and car_h >= self.trigger_height_px:
+            # (1) 거리 조건: bbox 높이가 **그 모델의** 임계 이상인가
+            trig = self.trigger_for(car_cls)
+            if car_present and car_h >= trig:
                 # (2) 피할 쪽을 정하고 (3) **즉시** 그 오프셋으로 목표를 옮긴다.
                 d = self._pick_side(car_cx, image_width)
                 self._dir = d
@@ -210,7 +227,8 @@ class OvertakeBehavior:
                 side = "left" if d > 0 else "right"
                 move = "right" if d > 0 else "left"
                 self.last_reason = (
-                    f"start: car {side}(cx{car_cx:.0f} h{car_h:.0f}) -> "
+                    f"start: car{int(car_cls)} {side}"
+                    f"(cx{car_cx:.0f} h{car_h:.0f}>={trig:.0f}) -> "
                     f"move {move} {self._amount:.0f}px")
                 return self._offset()
             return 0.0
@@ -271,6 +289,7 @@ class LateralPlanner:
                 dt,
                 obs.car_present, obs.car_cx, obs.car_h,
                 image_width,
+                getattr(obs, "car_cls", 0),
             )
 
         return target

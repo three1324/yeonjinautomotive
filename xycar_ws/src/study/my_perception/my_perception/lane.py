@@ -107,6 +107,51 @@ def _left_band(instances, band_px):
     return [(xs[keep], ys[keep])]
 
 
+def horizontal_dashed_left_strip(dashed_instances, strip_width_px=30.0):
+    """세로형 dashed 는 그대로 두고, **가로형만** 왼쪽 strip_width_px 로 자른다.
+
+    [2026-08-23 이식] 팀원 구현(race_perception/branch_detector.py)을
+    그대로 옮겼다. 좌회전을 마치고 **본선으로 합류할 때** 쓴다.
+
+    ──────────────────────────────────────────────────────────
+    문제: 합류 지점에서는 본선의 노란선이 화면을 **가로로** 가로질러
+    보인다. 그것까지 합쳐서 피팅하면 x = f(y) 가 퇴화해 조향이 튀다.
+
+    해법: 인스턴스를 **가로형 / 세로형으로 먼저 분류**한다.
+        x 퍼짐 <= y 퍼짐   ->  세로형 = 내가 가는 방향의 차선  ->  그대로 둔다
+        x 퍼짐 >  y 퍼짐   ->  가로형 = 앞을 가로지르는 선    ->  왼쪽 끝만 남긴다
+
+    ★ 이것이 _left_band() 와 다른 점이다. _left_band 는 가로/세로를
+      구분하지 않고 **모든** dashed 를 행별로 깎으므로, 진행 방향 차선까지
+      왼쪽으로 편향시킨다(합성검증: 단일선 -3px, 가로선 -36px).
+      분기점에서는 _left_band, 합류에서는 이 함수를 쓴다.
+
+    가로형을 자를 때 화면 x=0 이 아니라 **가로형 픽셀을 전부 합친 뒤
+    그 최소 x** 에서 strip_width_px 만큼만 남긴다.
+
+    반환: 필터를 거친 dashed 인스턴스 리스트.
+    """
+    filtered = []
+    horizontal = []
+    for xs, ys in dashed_instances:
+        xs = np.asarray(xs)
+        ys = np.asarray(ys)
+        if xs.size == 0 or ys.size == 0:
+            continue
+        if float(np.ptp(xs)) <= float(np.ptp(ys)):
+            filtered.append((xs, ys))
+            continue
+        horizontal.append((xs, ys))
+    if horizontal:
+        xs = np.concatenate([item[0] for item in horizontal])
+        ys = np.concatenate([item[1] for item in horizontal])
+        left = float(np.min(xs))
+        selected = xs <= left + max(1.0, float(strip_width_px))
+        if np.any(selected):
+            filtered.append((xs[selected], ys[selected]))
+    return filtered
+
+
 class LaneEstimator:
     """차선 마스크에서 트랙 중앙을 추정한다.
 

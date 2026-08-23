@@ -52,6 +52,12 @@ class Detections:
     #   기울기에 흔들리고 차가 화면 아래로 잘리면 오히려 작아진다.
     #   높이는 거의 순수하게 거리의 함수다.
     car_conf: float = 0.0
+    car_cls: int = 0
+    # ↑ 방해차량 모델 번호. CAR_NAMES 의 인덱스 + 1 이다
+    #   (0 = 없음, 1 = AvanteN, 2 = ionic5).
+    #   [2026-08-23] 모델마다 차체 크기가 달라 같은 거리에서도
+    #   bbox 높이가 다르다. 회피 트리거 문턱을 모델별로 나누려면
+    #   어느 모델인지를 판단 쪽으로 알려줘야 한다.
 
 
 def extract(result, names, width, height, dashed_conf, solid_conf,
@@ -121,5 +127,6 @@ def extract(result, names, width, height, dashed_conf, solid_conf,
                 det.car_bottom_y = y2
                 det.car_h = y2 - y1      # 회피 트리거의 거리 판단에 쓴다
                 det.car_conf = conf
+                det.car_cls = CAR_NAMES.index(cls) + 1
 
     return det

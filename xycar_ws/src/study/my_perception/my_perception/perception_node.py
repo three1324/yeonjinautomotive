@@ -16,7 +16,18 @@
              (트랙중앙 ± 반폭/2 = 트랙 반쪽의 중앙)를 만드는 데 쓴다. 0이면 미학습.
     /light   Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT (투표 확정값)
     /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y,
-                                cone_max_h, car_h]
+                                cone_max_h, car_h, car_cls]
+             car_cls 는 방해차량 모델 번호(0=없음, 1=AvanteN, 2=ionic5).
+             모델마다 차체가 달라 같은 거리에서도 bbox 높이가 다르므로,
+             회피 트리거 문턱을 모델별로 나누려고 판단 쪽으로 넘긴다.
+
+구독:
+    /left_exit Int32   1이면 **좌회전 합류(EXIT) 모드**. 이때만 차선 추정을
+             horizontal_dashed_left_strip 으로 거른 노란 점선만으로 한다
+             (흰 실선은 아예 버린다). 합류 지점에서 앞을 가로지르는 본선
+             노란선과 본선 흰 실선이 같이 잡히면 중앙 추정이 무너지기
+             때문이다. 판단(언제 EXIT 인가)은 my_driver 의 몫이므로
+             여기서는 스위치만 받는다.
     /debug_image Image         publish_debug_image=true 일 때만. YOLO 박스 + 차선 시각화
                  (my_debug/pipeline_view_node 전용, 기본 off — CPU 추론 병목 때문)
 
@@ -34,7 +45,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, Int32
 
 from my_perception.detect import extract
-from my_perception.lane import LaneEstimator
+from my_perception.lane import LaneEstimator, horizontal_dashed_left_strip
 from my_perception.light_vote import STATE_TO_NAME, LightVoter
 
 # 디버그 패널 박스 색상 (BGR). YOLO 결과 시각화용이라 여기서만 쓴다.
@@ -68,6 +79,7 @@ class PerceptionNode(Node):
                 ("lane.eval_far", 310),
                 ("lane.center_bias_px", 0.0),
                 ("lane.left_band_px", 30.0),
+                ("lane.left_exit_strip_px", 30.0),
                 ("lane.min_pts", 50),
                 ("lane.min_span", 20),
                 ("lane.hold_frames", 15),
@@ -149,6 +161,11 @@ class PerceptionNode(Node):
             Image, self.get_parameter("image_topic").value, self.on_image, sensor_qos
         )
 
+        # 좌회전 합류(EXIT) 스위치. driver_node 의 TimedLeftDrive 가 EXIT 위상에
+        # 들어가면 1을 보낸다. 판단은 my_driver 가 하고 여기는 따르기만 한다.
+        self._left_exit = False
+        self.create_subscription(Int32, "left_exit", self.on_left_exit, reliable_qos)
+
         self._frames = 0
         self._log_period = self.get_parameter("log_period_sec").value
         self._last_log = self.get_clock().now()
@@ -221,6 +238,9 @@ class PerceptionNode(Node):
             max_jump_px=g("lane.max_jump_px").value,
         )
 
+    def on_left_exit(self, msg):
+        self._left_exit = bool(int(msg.data))
+
     def on_image(self, msg):
         try:
             frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
@@ -249,7 +269,21 @@ class PerceptionNode(Node):
             car_conf=self.car_conf,
         )
 
-        lane = self.estimator.update(det.dashed, det.solid)
+        # 좌회전 합류(EXIT) 모드에서는 입력을 바꾼다.
+        #   - 노란 점선: 가로형만 왼쪽 strip 으로 자른다(세로형은 그대로)
+        #   - 흰 실선: **아예 안 쓴다**
+        # 합류 지점에서 앞을 가로지르는 본선 노란선과 본선 흰 실선을 그대로
+        # 넣으면 좌우 중점이 엉뚱한 곳에 잡히고 x=f(y) 피팅이 퇴화한다.
+        if self._left_exit:
+            dashed_in = horizontal_dashed_left_strip(
+                det.dashed,
+                self.get_parameter("lane.left_exit_strip_px").value,
+            )
+            solid_in = []
+        else:
+            dashed_in, solid_in = det.dashed, det.solid
+
+        lane = self.estimator.update(dashed_in, solid_in)
         state = self.voter.update(det.lamp, det.lamp_conf, det.light_width)
 
         self.pub_lane.publish(Float32MultiArray(data=[
@@ -280,6 +314,10 @@ class PerceptionNode(Node):
             # [확장 필드] 방해차량 bbox 높이(px). 회피 트리거의 거리 판단.
             # 하단 y(위 5번째)는 진단용으로만 남긴다 — detect.py 주석 참고.
             float(det.car_h),
+            # [확장 필드] 방해차량 모델 번호(0=없음, 1=AvanteN, 2=ionic5).
+            # 모델마다 차체 크기가 달라 같은 거리에서도 bbox 높이가 다르다.
+            # 회피 트리거 문턱을 모델별로 나누려고 판단 쪽으로 넘긴다.
+            float(det.car_cls),
         ]))
 
         if self.publish_debug_image:
