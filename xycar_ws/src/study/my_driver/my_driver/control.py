@@ -157,12 +157,43 @@ class SpeedLimiter:
     ────────────────────────────────────────────────────────────────
     """
 
-    def __init__(self, accel_per_sec, decel_per_sec, speed_limit, kick=0.0):
+    def __init__(self, accel_per_sec, decel_per_sec, speed_limit, kick=0.0,
+                 accel_bounds=None, accel_rates=None):
         self.accel = accel_per_sec
         self.decel = decel_per_sec
         self.speed_limit = speed_limit
         self.kick = kick
         self._cmd = 0.0
+
+        # ── 구간별 가속 (2026-08-24) ───────────────────────────────────
+        # accel_bounds = [11.0, 15.0], accel_rates = [4.0, 7.0, 10.0] 이면
+        #     speed <  11        -> 4.0 /s
+        #     11 <= speed < 15   -> 7.0 /s
+        #     15 <= speed        -> 10.0 /s
+        # rates 는 bounds 보다 **정확히 하나 많아야** 한다.
+        #
+        # 왜 나누나: VESC UNDER_VOLTAGE(fault 2)는 전류가 배터리 전압을
+        # 끌어내려 생긴다. BLDC 전류는 대략 (인가전압 - 역기전력)/저항 인데,
+        # **역기전력은 회전수에 비례**한다. 즉 같은 가속 요구라도
+        # **저속일수록 전류가 크다.** 평탄한 accel 은 가장 위험한 저속
+        # 구간에 고속 구간과 똑같은 기울기를 준다 — 그게 문제였다.
+        #
+        # 저속만 완만하게 하고 고속은 오히려 키우면, 총 도달 시간은 거의
+        # 같으면서 전류 첨두만 깎인다(합성계산: 7->18 이 1.83s vs 1.87s).
+        self.accel_bounds = list(accel_bounds or [])
+        self.accel_rates = list(accel_rates or [])
+        if len(self.accel_rates) != len(self.accel_bounds) + 1:
+            # 짝이 안 맞으면 조용히 틀리게 도는 것보다 끄는 편이 낫다.
+            self.accel_bounds, self.accel_rates = [], []
+
+    def accel_at(self, speed):
+        """현재 속도에서 쓸 가속률(/s). 구간이 없으면 평탄값."""
+        if not self.accel_rates:
+            return self.accel
+        for bound, rate in zip(self.accel_bounds, self.accel_rates):
+            if speed < bound:
+                return rate
+        return self.accel_rates[-1]
 
     def reset(self):
         self._cmd = 0.0

@@ -16,7 +16,7 @@
              (트랙중앙 ± 반폭/2 = 트랙 반쪽의 중앙)를 만드는 데 쓴다. 0이면 미학습.
     /light   Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT (투표 확정값)
     /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y,
-                                cone_max_h, car_h, car_cls]
+                                cone_max_h, car_h, car_cls, light_width]
              car_cls 는 방해차량 모델 번호(0=없음, 1=AvanteN, 2=ionic5).
              모델마다 차체가 달라 같은 거리에서도 bbox 높이가 다르므로,
              회피 트리거 문턱을 모델별로 나누려고 판단 쪽으로 넘긴다.
@@ -318,6 +318,11 @@ class PerceptionNode(Node):
             # 모델마다 차체 크기가 달라 같은 거리에서도 bbox 높이가 다르다.
             # 회피 트리거 문턱을 모델별로 나누려고 판단 쪽으로 넘긴다.
             float(det.car_cls),
+            # [확장 필드] traffic_light 박스 폭(px). 0 이면 신호등이
+            # 화면에 없다. driver_node 가 "신호등에 접근 중"을 판단해
+            # 미리 감속하는 데 쓴다. 램프 클래스가 아니라 **신호등 본체**라
+            # 색을 못 읽는 거리에서도 잡힐다 — 그게 핵심이다.
+            float(det.light_width),
         ]))
 
         if self.publish_debug_image:

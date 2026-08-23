@@ -139,6 +139,7 @@ class Obs:
     car_bottom_y: float = 0.0   # 진단용. 회피 트리거에는 안 쓴다
     car_h: float = 0.0          # bbox 높이(px) — 회피 트리거의 거리 판단
     car_cls: int = 0            # 1=AvanteN, 2=ionic5. 모델별 트리거 문턱 선택용
+    light_width: float = 0.0    # traffic_light 박스 폭(px). 0 = 화면에 없음
 
     cone_max_h: float = 0.0   # 가장 큰 콘 bbox 높이(px). 구간 진입 거리 판단용
 
@@ -230,6 +231,16 @@ class DriverNode(Node):
                 ("speed.min", 4.0),
                 ("speed.limit", 27.0),
                 ("speed.accel_per_sec", 20.0),
+                # 구간별 가속 (2026-08-24). bounds 보다 rates 가 정확히
+                # 하나 많아야 한다. 짝이 안 맞으면 자동으로 꺼진다.
+                #   speed < 11 -> 4.0/s,  11~15 -> 7.0/s,  15 이상 -> 10.0/s
+                # 빈 배열을 넣으면 accel_per_sec 평탄값으로 돌아간다.
+                ("speed.accel_bounds", [11.0, 15.0]),
+                ("speed.accel_rates", [4.0, 7.0, 10.0]),
+                # 신호등이 **화면에 보이기만 하면** 이 속도로 제한한다.
+                # 램프 색과 무관하게 걸린다 — 색을 판단하기 전부터
+                # 느려져야 판단할 시간이 벌린다. 0 이면 끔다.
+                ("speed.light_approach", 13.0),
                 ("speed.decel_per_sec", 60.0),
                 ("speed.curve_px_lo", 30.0),
                 ("speed.curve_px_hi", 150.0),
@@ -321,8 +332,11 @@ class DriverNode(Node):
             speed_gain_ref=g("steer.speed_gain_ref").value,
             invert=g("steer.invert").value,
         )
+        self.light_approach_speed = g("speed.light_approach").value
         self.speed_limiter = SpeedLimiter(
             accel_per_sec=g("speed.accel_per_sec").value,
+            accel_bounds=list(g("speed.accel_bounds").value or []),
+            accel_rates=list(g("speed.accel_rates").value or []),
             decel_per_sec=g("speed.decel_per_sec").value,
             speed_limit=g("speed.limit").value,
             kick=g("speed.kick").value,
@@ -433,6 +447,10 @@ class DriverNode(Node):
         # 무너진다(더 가까워야 발동).
         if len(msg.data) >= 8:
             self.obs.car_cls = int(msg.data[7])
+        # 신호등 본체 박스 폭. 없으면 0 이라 접근 감속이 안 걸린다
+        # — 옆 perception_node 와 섞으면 평소대로 달린다(안전한 방향은 아니다).
+        if len(msg.data) >= 9:
+            self.obs.light_width = msg.data[8]
 
 
     def on_cone_cmd(self, msg):
@@ -648,6 +666,21 @@ class DriverNode(Node):
             overtake_active=self.lateral.overtake.active,
         )
 
+        # ── 신호등 접근 감속 (2026-08-24) ──
+        # **신호등 본체가 화면에 보이기만 하면** 이 속도로 제한한다.
+        # 램프 색(직좌/직진)은 보지 않는다 — 색을 판단하기 전부터 느려져야
+        # 판단할 시간이 벌리기 때문이다.
+        #
+        # 왜 램프가 아니라 본체인가: 램프 클래스는 가까워야 잡히지만
+        # traffic_light 본체는 먼 거리에서도 conf 0.80~0.88 로 잡힌다.
+        # 즉 "앞에 신호등이 있다"를 색보다 훨씬 먼저 알 수 있다.
+        #
+        # 지나치면 light_width 가 0 이 되어 자동으로 풀린다 — 별도 해제
+        # 조건이 없다. 소실이 곧 "지나쳤다"는 위치 사건이다(좌회전과 같은 논리).
+        if (self.light_approach_speed > 0.0
+                and self.obs.light_width > 0.0):
+            target_speed = min(target_speed, self.light_approach_speed)
+
         # ── 좌회전 구간 속도 고정 ──
         # WAIT_CLEAR / STRAIGHT 는 곡률·품질 감속을 무시하고 left.speed 로
         # 간다. 좌회전은 시간으로 재는 개루프라 **속도가 흔들리면 꺾는
@@ -788,6 +821,9 @@ class DriverNode(Node):
             "car_cx": round(float(self.obs.car_cx), 1),
             "car_bottom_y": round(float(self.obs.car_bottom_y), 1),
             "car_h": round(float(self.obs.car_h), 1),
+            "car_cls": int(self.obs.car_cls),
+            # 신호등 본체 폭(px). >0 이면 접근 감속이 걸려 있다는 뜻.
+            "light_w": round(float(self.obs.light_width), 1),
             # 좌회전 직후 회피 차단이 걸려 있는지. 0 이면 평소대로 회피한다.
             # 이게 안 보이면 "왜 안 피하지"를 화면에서 못 가른다.
             "ot_block": round(self._overtake_block_left, 1),
