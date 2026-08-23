@@ -140,7 +140,7 @@ class LaneEstimator:
         width,
         height,
         y_lo=270,
-        y_hi=425,
+        y_hi=400,   # [2026-08-23] 425 -> 400. 차량 커버가 가리는 하단 위
         eval_near=400,
         eval_far=310,
         center_bias_px=0.0,
