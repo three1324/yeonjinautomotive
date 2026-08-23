@@ -596,8 +596,9 @@ class DriverNode(Node):
         # 표지를 지난 뒤 straight_sec 직진하고, **조건 없이** 고정 조향으로
         # 꺾는다. 인지를 전혀 안 본다 — 순수 개루프다. 분기 안쪽은 차선
         # 표시가 신뢰할 수 없기 때문이다.
-        #   ⚠️ 대가: LEFT 오검출 한 번에 조건 없이 좌회전한다. 방어는
-        #      left.confirm_frames 하나뿐이다 (팀원 설정 = 1).
+        #   ⚠️ 대가: LEFT 오검출이 연속되면 조건 없이 좌회전한다. 방어는
+        #      light.min_weight_left/min_ratio_left 와 left.confirm_frames
+        #      (현재 2)뿐이다.
         if self.fsm.left_phase == TimedLeftDrive.TURN:
             self._drive_left_turn(dt, state)
             return

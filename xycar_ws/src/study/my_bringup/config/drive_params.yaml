@@ -216,10 +216,16 @@ perception_node:
       #   실패 모드와 무관하므로 여기만 따로 낮춘다.
       #
       # ⚠️ 공짜는 아니다. LEFT 오검출은 차를 좌회전 분기로 보내고,
-      #    돌아오는 데 fsm.shortcut_total_sec(15초)가 걸린다. 오발동이
-      #    보이면 이 둘을 올리거나 fsm.shortcut_confirm_frames 를 올릴 것.
-      min_weight_left: 1.5
-      min_ratio_left: 0.45
+      #    돌아오는 데 left.straight_sec+turn_sec+exit_sec(9.7초)가 걸린다.
+      #    오발동이 보이면 이 둘을 올리거나 left.confirm_frames 를 올릴 것.
+      min_weight_left: 1.0
+      # ↑ [사용자 결정 2026-08-24] 1.5 -> **1.0**. 더 적은 누적 증거로도
+      #   확정한다 — 신호등이 멀거나(size_w 가 작음) 짧게 스쳐도 잡힌다.
+      min_ratio_left: 0.40
+      # ↑ [사용자 결정 2026-08-24] 0.45 -> **0.40**. 다른 램프(RED/GREEN)가
+      #   섞여 들어와도 더 쉽게 LEFT 로 확정한다.
+      #   ⚠️ 이 두 값을 내린 만큼 오검출 확률이 올라간다. 방어선은 이제
+      #      left.confirm_frames(2) 하나만 남는다 — 그 값도 같이 올렸다.
 
     log_period_sec: 2.0
     publish_debug_image: false
@@ -658,7 +664,7 @@ driver_node:
       #   출발하지 않는다(auto_start 로만 움직인다).
       #
       #   ⚠️ **LEFT 는 좌회전 트리거이기도 하다.** 출발 직후 화살표가 계속
-      #      보이면 left.confirm_frames(1) 만에 곧바로 무장(WAIT_CLEAR)된다.
+      #      보이면 left.confirm_frames(2) 만에 곧바로 무장(WAIT_CLEAR)된다.
       #      다만 WAIT_CLEAR 는 아직 안 꺾고 속도만 12로 맞추는 단계라
       #      되돌릴 수 있다 — 실제로 꺾는 것은 표지가 사라진 뒤다.
       #      좌회전 분기가 출발선 근처에 있어야 말이 된다. 아니라면
@@ -673,14 +679,18 @@ driver_node:
     #  좌회전 파라미터 (팀원 mission.yaml 값 그대로)
     # ══════════════════════════════════════════════════════════════════
     left:
-      confirm_frames: 1
-      # ↑ [팀원값] 좌회전 화살표가 몇 프레임 연속 확정돼야 **무장**할지.
+      confirm_frames: 2
+      # ↑ [사용자 결정 2026-08-24] 1(팀원값) -> **2**.
+      #   좌회전 화살표가 몇 프레임 연속 확정돼야 **무장**할지.
       #   LightVoter 가 이미 투표(light.min_weight_left / min_ratio_left)로
-      #   확정한 뒤이므로 한 프레임으로도 오발동이 잘 안 난다는 판단이다.
+      #   확정한 뒤이므로 한 프레임으로도 오발동이 잘 안 난다는 게 팀원
+      #   판단이었지만, 이번에 그 투표 문턱(min_weight_left 1.5->1.0,
+      #   min_ratio_left 0.45->0.40)을 낮춰 LEFT 가 더 쉽게 확정되도록
+      #   했다. 확정이 쉬워진 만큼 여기서 한 겹 더 걸러준다.
       #   무장은 아직 안 꺾는 단계라 되돌릴 수 있다 — 되돌릴 수 없는
       #   출발(fsm.start_confirm_frames=5)과 문턱이 다른 이유다.
-      #   ⚠️ 그래도 이게 LEFT 오검출에 대한 마지막 방어선이다. 오발동이
-      #      보이면 여기부터 올릴 것 (2 또는 3).
+      #   ⚠️ 이게 LEFT 오검출에 대한 마지막 방어선이다. 오발동이
+      #      보이면 여기부터 올릴 것 (3 또는 그 이상).
 
       clear_frames: 3
       # ↑ [팀원값] LEFT 가 아닌 프레임이 이만큼 연속이어야 "표지를
