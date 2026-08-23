@@ -169,8 +169,9 @@ class DriverNode(Node):
                 # FSM
                 ("fsm.start_confirm_frames", 5),
                 # 좌회전(지름길) 진입 — LEFT 확정 즉시 SHORTCUT 으로 들어가
-                # SHIFT(왼쪽으로 붙기) -> FOLLOW(좌측밴드 노란선 추종) 로
-                # shortcut_total_sec 동안 간다. 고정 조향은 쓰지 않는다.
+                # SHIFT(안쪽으로 붙고 신호등 지날 때까지 대기) ->
+                # TURN_IN(좌측밴드 잡히면 고정 조향 강제 회전) ->
+                # FOLLOW(좌측밴드 추종) 로 shortcut_total_sec 동안 간다.
                 #
                 # ★ [2026-08-23] 기본값을 False -> **True** 로 바꿨다.
                 #   좌회전 구현이 이것 하나뿐이라(하드코딩 TimedLeftDrive 는
@@ -190,7 +191,7 @@ class DriverNode(Node):
                 # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
                 # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
                 ("shortcut.shift_px", 90.0),
-                ("shortcut.turn_angle", 35.0),
+                ("shortcut.turn_angle", 30.0),
                 ("shortcut.turn_speed", 10.0),
                 # 좌회전을 끝낸 뒤 이만큼은 회피를 하지 않는다. 분기 직후는
                 # 화면이 평소와 달라 YOLO 가 차량을 오검출하기 쉬운데, 그때
