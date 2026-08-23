@@ -189,7 +189,7 @@ class DriverNode(Node):
                 ("fsm.shortcut_arm_timeout_sec", 5.0),
                 # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
                 # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
-                ("shortcut.shift_px", 70.0),
+                ("shortcut.shift_px", 90.0),
                 # 좌회전을 끝낸 뒤 이만큼은 회피를 하지 않는다. 분기 직후는
                 # 화면이 평소와 달라 YOLO 가 차량을 오검출하기 쉬운데, 그때
                 # 회피가 걸리면 갓 들어온 길에서 옆으로 벌린 채 달린다.
@@ -316,6 +316,9 @@ class DriverNode(Node):
         # 마지막 횡방향 기준. 로그·시각화가 읽는다.
         # (융합을 걷어낸 뒤로는 항상 차선이 출처라 LaneRef 하나면 된다.)
         self._ref = LaneRef()
+        # _pub_debug 가 on_tick 의 조기 return 경로(disabled / stale /
+        # 신호대기)에서도 불리므로 반드시 먼저 초기화해야 한다.
+        self._use_left_band = False
         self._enabled = not self.require_enable
         self._last_lane_time = None
         self._lane_lost_since = None
@@ -555,9 +558,11 @@ class DriverNode(Node):
         # ARM_WAIT (신호등을 지나치기 전) 는 평소 추정 그대로다 —
         # 아직 분기점이 아니라 노란선이 하나뿐이고, 좌측밴드를 쓰면
         # 이득 없이 왼쪽으로 편향만 생긴다.
-        use_left_band = (state is State.SHORTCUT
-                         and self.fsm.shortcut_phase is not ShortcutPhase.ARM_WAIT
-                         and self.obs.lane_valid_left)
+        use_left_band = (
+            state is State.SHORTCUT
+            and self.fsm.shortcut_phase is not ShortcutPhase.ARM_WAIT
+            and self.obs.lane_valid_left)
+        self._use_left_band = use_left_band
         if use_left_band:
             ref = LaneRef(self.obs.offset_near_left, self.obs.offset_far_left,
                           True, self.obs.quality)
@@ -676,6 +681,14 @@ class DriverNode(Node):
             "shortcut_phase": (self.fsm.shortcut_phase.value
                                if self.fsm.shortcut_phase else "-"),
             "shortcut_remain": round(self.fsm.shortcut_remain, 1),
+            # 좌측밴드가 지금 쓰이고 있는가.
+            #   lb_valid=false 면 SHORTCUT 이어도 평소 추정으로
+            #   폴백한다 — 그러면 좌회전이 "1.5초 깔짝하고 말는"
+            #   것처럼 보인다. 예: perception 을 안 받아
+            #   /lane 이 6필드로 오면 항상 false 다.
+            "lb_valid": bool(self.obs.lane_valid_left),
+            "lb_used": bool(self._use_left_band),
+            "lb_near": round(self.obs.offset_near_left, 1),
             # 라이다(rubbercone_node)가 몰고 있는 구간인지. 화면에서 바로
             # 구분돼야 "지금 누가 운전 중인가"를 오해하지 않는다.
             "cone_zone": bool(self.cone_zone.active),
