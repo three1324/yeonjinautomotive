@@ -183,13 +183,15 @@ class DriverNode(Node):
                 ("fsm.start_on_green", True),
                 ("fsm.start_on_left", True),
                 ("fsm.shortcut_total_sec", 15.0),
-                ("fsm.shortcut_shift_sec", 1.5),
+                ("fsm.shortcut_turn_sec", 1.5),
                 ("fsm.shortcut_confirm_frames", 5),
                 ("fsm.shortcut_lost_frames", 3),
                 ("fsm.shortcut_arm_timeout_sec", 5.0),
                 # 꺾는 동안 낼 **원시** 조향/속도. 인지를 안 보고 이 값만 낸다.
                 # 부호: **양수가 좌회전**이다 (steer.invert=true + 8/21 실측).
                 ("shortcut.shift_px", 90.0),
+                ("shortcut.turn_angle", 35.0),
+                ("shortcut.turn_speed", 10.0),
                 # 좌회전을 끝낸 뒤 이만큼은 회피를 하지 않는다. 분기 직후는
                 # 화면이 평소와 달라 YOLO 가 차량을 오검출하기 쉬운데, 그때
                 # 회피가 걸리면 갓 들어온 길에서 옆으로 벌린 채 달린다.
@@ -254,7 +256,7 @@ class DriverNode(Node):
             start_on_green=g("fsm.start_on_green").value,
             start_on_left=g("fsm.start_on_left").value,
             shortcut_total_sec=g("fsm.shortcut_total_sec").value,
-            shortcut_shift_sec=g("fsm.shortcut_shift_sec").value,
+            shortcut_turn_sec=g("fsm.shortcut_turn_sec").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
             shortcut_lost_frames=g("fsm.shortcut_lost_frames").value,
             shortcut_arm_timeout_sec=g("fsm.shortcut_arm_timeout_sec").value,
@@ -278,6 +280,8 @@ class DriverNode(Node):
             enable_overtake=g("lateral.enable_overtake").value,
         )
         self.shortcut_shift_px = g("shortcut.shift_px").value
+        self.shortcut_turn_angle = g("shortcut.turn_angle").value
+        self.shortcut_turn_speed = g("shortcut.turn_speed").value
         self.shortcut_overtake_block = g("shortcut.overtake_block_sec").value
         # 남은 회피 차단 시간(초). 좌회전이 끝나는 순간 채워지고 매 tick 준다.
         self._overtake_block_left = 0.0
@@ -537,6 +541,19 @@ class DriverNode(Node):
             self._pub_debug(state.value, 0.0, 0.0, "cone_cmd lost")
             return
 
+        # ── 좌회전 강제 회전 (TURN_IN) ──
+        # 신호등을 지난 뒤 shortcut_turn_sec 동안, **좌측밴드가 탐지되면**
+        # 고정 조향으로 밀어넣는다. 분기 초입은 곡선이 급해서 인지 추종만
+        # 으로는 못 꺾고 지나칠 수 있기 때문이다.
+        #
+        # ★ 좌측밴드가 안 잡히면 **걸지 않는다.** 근거 없이 꺾으면 분기가
+        #   없는 곳에서 LEFT 오검출 한 번에 트랙을 벗어난다. 그때는 아래
+        #   평소 차선 주행으로 그냥 흘려보낸다.
+        if (self.fsm.shortcut_phase is ShortcutPhase.TURN_IN
+                and self.obs.lane_valid_left):
+            self._drive_shortcut_turn(dt, state)
+            return
+
         if self._last_source != "lane":
             self.get_logger().info(
                 f"CONE_ZONE 이탈 — 차선 주행으로 복귀 ({self.cone_zone.last_reason})")
@@ -554,13 +571,13 @@ class DriverNode(Node):
         #
         # 좌측밴드가 무효면(노란선을 아예 못 봄, 또는 옛 perception_node)
         # 평소 추정으로 폴백한다 — 갈 곳이 없는 것보다 낫다.
-        # 좌측밴드는 SHIFT/FOLLOW 에서만 쓴다.
-        # ARM_WAIT (신호등을 지나치기 전) 는 평소 추정 그대로다 —
-        # 아직 분기점이 아니라 노란선이 하나뿐이고, 좌측밴드를 쓰면
-        # 이득 없이 왼쪽으로 편향만 생긴다.
+        # 좌측밴드는 TURN_IN/FOLLOW 에서만 쓴다.
+        # SHIFT (신호등을 지나치기 전, 안쪽으로 붙는 중) 는 평소 추정
+        # 그대로다 — 아직 분기점이 아니라 노란선이 하나뿐이고, 좌측밴드를
+        # 쓰면 이득 없이 왼쪽으로 편향만 생긴다.
         use_left_band = (
             state is State.SHORTCUT
-            and self.fsm.shortcut_phase is not ShortcutPhase.ARM_WAIT
+            and self.fsm.shortcut_phase is not ShortcutPhase.SHIFT
             and self.obs.lane_valid_left)
         self._use_left_band = use_left_band
         if use_left_band:
@@ -626,6 +643,38 @@ class DriverNode(Node):
         self._publish(angle, speed)
         self._log(state, angle, speed, self.longitudinal.last_reason)
         self._pub_debug(state.value, angle, speed, self.longitudinal.last_reason)
+
+    def _drive_shortcut_turn(self, dt, state):
+        """좌회전 강제 회전 — 고정 조향각 + 고정 속도. 인지는 안 본다.
+
+        진입 조건(좌측밴드 탐지)은 호출부가 이미 확인했다. 여기서는 정해진
+        각도만 낸다.
+
+        왜 고정값인가: 분기 초입은 곡선이 급해서, 좌측밴드를 보고 있어도
+        인지 추종만으로는 못 꺾고 지나칠 수 있다. 그 1.5초만 밀어넣고
+        궤도에 올라선 뒤(FOLLOW)부터 다시 인지로 넘긴다.
+
+        **속도도 같이 고정해야** 회전 반경이 재현된다 — 같은 조향각이라도
+        속도가 다르면 반경이 달라진다. 다만 SpeedLimiter 는 통과시킨다.
+        알고리즘이 아니라 하드웨어 보호다(급가속이 배터리 전압을 끌어내려
+        VESC 가 UNDER_VOLTAGE 로 멈춘다).
+
+        조향은 follow_external() 로 낸다 — 변화율 제한(rate_limit)만 걸린다.
+        sync() 처럼 즉시 꽂으면 서보에 계단 입력이 그대로 간다. 180도/s 면
+        35도까지 0.19초라 1.5초 창에서는 충분히 도달한다.
+        """
+        angle = self.steering.follow_external(dt, self.shortcut_turn_angle)
+        speed = self.speed_limiter.update(dt, self.shortcut_turn_speed)
+
+        if self._last_source != "shortcut_turn":
+            self.get_logger().info(
+                f"SHORTCUT/TURN_IN — 좌측밴드 탐지, 고정 조향 {angle:+.1f} 로 "
+                f"강제 회전 ({self.fsm.shortcut_turn_sec:.1f}s)")
+            self._last_source = "shortcut_turn"
+
+        self._publish(angle, speed)
+        self._log(state, angle, speed, "shortcut(turn_in)")
+        self._pub_debug(state.value, angle, speed, "shortcut(turn_in)")
 
     def _drive_cone_zone(self, dt, state):
         """라바콘 구간 — rubbercone_node 명령을 그대로 통과시킨다.
