@@ -7,7 +7,7 @@
     /lane      Float32MultiArray [offset_near, offset_far, valid, quality]
     /light     Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT
     /objects   Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y,
-                                  cone_max_h, car_h]
+                                  cone_max_h, car_h, car_cls, light_width, cone_min_h]
     /cone_cmd  Float32MultiArray [angle, speed]  라바콘 구간 전담 노드의 명령
     /cone_zone_active Bool                       그 노드의 구간 판정 (진단용, 제어 미사용)
 
@@ -142,6 +142,7 @@ class Obs:
     light_width: float = 0.0    # traffic_light 박스 폭(px). 0 = 화면에 없음
 
     cone_max_h: float = 0.0   # 가장 큰 콘 bbox 높이(px). 구간 진입 거리 판단용
+    cone_min_h: float = 0.0   # 가장 작은 콘 bbox 높이(px). 구간 이탈 거리 판단용
 
     # 라이다 관측(cor_*, front_dist, left_free, right_free)은 여기 없다.
     # 이 노드는 라바콘 구간에서 rubbercone_node 의 완성된 명령(/cone_cmd)만
@@ -212,6 +213,9 @@ class DriverNode(Node):
                 #   개수만 보면 직선 끝에서 콘 무리가 보이자마자 전환된다.
                 ("cone_zone.exit_n", 3),       # 이 개수 이하로 떨어지면 이탈 후보
                 ("cone_zone.exit_hold_sec", 1.5),  # 이탈 후보가 이만큼 지속돼야 실제 이탈
+                # 가장 작은(=가장 먼) 콘의 bbox 높이가 이 값 이하면 이탈 후보
+                # (개수 조건과 OR). 0 이면 끈다.
+                ("cone_zone.exit_min_size_px", 0.0),
                 # rubbercone_node 의 명령이 얼마나 오래되면 "죽었다"고 볼지의 기준.
                 # 그 노드는 /scan 주기(약 10Hz)로 발행하므로 0.5s 면 5프레임 여유.
                 ("cone_cmd_timeout_sec", 0.5),
@@ -290,6 +294,7 @@ class DriverNode(Node):
             enter_min_size_px=g("cone_zone.enter_min_size_px").value,
             exit_n=g("cone_zone.exit_n").value,
             exit_hold_sec=g("cone_zone.exit_hold_sec").value,
+            exit_min_size_px=g("cone_zone.exit_min_size_px").value,
         )
         self.cone_cmd_timeout = g("cone_cmd_timeout_sec").value
         self.lateral = LateralPlanner(
@@ -451,6 +456,11 @@ class DriverNode(Node):
         # — 옆 perception_node 와 섞으면 평소대로 달린다(안전한 방향은 아니다).
         if len(msg.data) >= 9:
             self.obs.light_width = msg.data[8]
+        # 가장 작은(=가장 먼) 콘의 bbox 높이. 없으면 0.0 이라 크기 기반
+        # 이탈 조건(cone_zone.exit_min_size_px)이 항상 참이 되어 그만큼
+        # **더 쉽게 이탈**한다 — 옛 perception_node 와 섞어 쓸 때의 방향.
+        if len(msg.data) >= 10:
+            self.obs.cone_min_h = msg.data[9]
 
 
     def on_cone_cmd(self, msg):
@@ -492,7 +502,7 @@ class DriverNode(Node):
         # 헤맸다(2026-08-19). 판정은 순수한 관측이라 여기서 돌아도 안전하다 —
         # 차를 움직이는 것은 아래 _drive_cone_zone() 뿐이다.
         in_cone_zone = self.cone_zone.update(
-            dt, self.obs.cone_n, self.obs.cone_max_h)
+            dt, self.obs.cone_n, self.obs.cone_max_h, self.obs.cone_min_h)
 
         # 회피 차단 시간도 여기서 준다. 아래 조기 return(정지·대기) 뒤에 두면
         # 서 있는 동안 시간이 안 흘러, 신호 대기 한 번에 차단이 무한정
@@ -785,6 +795,7 @@ class DriverNode(Node):
             # 구간 진입 트리거의 거리 조건. cone_n 은 찼는데 이게 작아서 안
             # 들어가는 상황을 화면에서 바로 구분하려면 같이 보여야 한다.
             "cone_h": round(self.obs.cone_max_h, 0),
+            "cone_min_h": round(self.obs.cone_min_h, 0),
             "zone_why": self.cone_zone.last_reason,
             # 좌회전(지름길) 위상과 그 위상의 남은 시간. 위상이 "-" 면 그
             # 구간이 아니다. SHIFT(왼쪽으로 붙는 중)인지 FOLLOW(좌측밴드
