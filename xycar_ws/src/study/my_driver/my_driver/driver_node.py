@@ -210,7 +210,7 @@ class DriverNode(Node):
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
                 ("lateral.trigger_height_px", 55.0),
-                ("lateral.shift_left_px", 70.0),
+                ("lateral.shift_left_px", 90.0),
                 ("lateral.shift_right_px", 90.0),
                 ("lateral.lost_hold_sec", 2.0),
                 ("lateral.cooldown_sec", 1.0),
