@@ -38,21 +38,24 @@ LIGHT_NAMES = {LIGHT_NONE: "NONE", LIGHT_RED: "RED", LIGHT_YELLOW: "YELLOW",
 class State(Enum):
     WAIT_LIGHT = "WAIT_LIGHT"   # 출발선 정지, 초록불 대기
     LANE_DRIVE = "LANE_DRIVE"   # 기본 주행
-    SHORTCUT = "SHORTCUT"       # 지름길 좌회전 (SHIFT -> FOLLOW, 총 15초)
+    SHORTCUT = "SHORTCUT"       # 지름길 (SHIFT -> GO -> TURN_IN -> FOLLOW)
     FINISH = "FINISH"           # 정지
 
 
 class ShortcutPhase(Enum):
-    """SHORTCUT 안의 서브위상. 세 걸음이다.
+    """SHORTCUT 안의 서브위상. 네 걸음이다.
 
     SHIFT   : LEFT 확정 **즉시** 진입. 목표를 왼쪽으로 shortcut_shift_px
               옮겨(회피 기동과 같은 방식) 1차선 안쪽으로 붙는다. 횡방향
               기준은 평소 추정 그대로다. **LEFT 가 사라질 때까지 유지**한다
               — 그 순간이 곧 "신호등을 지나쳤다"는 위치 사건이다.
-    TURN_IN : 신호등을 지난 뒤 shortcut_turn_sec(1.5s) 동안의 창.
-              이 창 안에서 **좌측밴드가 탐지되면 고정 조향으로 강제 좌회전**
-              한다(인지를 안 보고 정해진 각도만 낸다). 좌측밴드가 안 잡히면
-              강제 회전 없이 평소대로 달린다 — 근거 없이 꺾는 것보다 낫다.
+    GO      : 신호등을 지난 뒤 shortcut_straight_sec(1.0s) 동안 **직진**.
+              안쪽으로 붙은 오프셋은 그대로 두고 평소 추정으로 달린다.
+              분기점 입구까지 가는 거리다 — 신호등 바로 앞에서 꺾으면
+              분기 전에 꺾는 셈이 된다.
+    TURN_IN : shortcut_turn_sec(1.5s) 동안 **고정 조향으로 좌회전**.
+              인지를 전혀 안 본다 — 정해진 각도(turn_angle)와 속도
+              (turn_speed)만 낸다.
     FOLLOW  : 목표 오프셋을 0 으로 되돌리고, SHORTCUT 이 끝날 때까지
               좌측밴드 노란선을 계속 따라간다.
 
@@ -63,12 +66,19 @@ class ShortcutPhase(Enum):
     화면에 들어오려면 미리 안쪽으로 붙어 있어야 한다. 신호등을 지난 뒤
     붙기 시작하면 이미 늦다.
 
-    강제 회전을 넣은 이유: 분기 초입은 좌측밴드가 잡히더라도 곡선이
-    급해서 인지 추종만으로는 못 꺾고 지나칠 수 있다. 그 1.5초만 고정
-    조향으로 밀어넣고, 궤도에 올라선 뒤부터 다시 인지로 넘긴다.
+    GO -> TURN_IN 을 **조건 없이 시간으로** 도는 이유(2026-08-23 사용자
+    결정): 좌측밴드 탐지를 조건으로 걸었더니 분기 초입에서 안 잡히는
+    프레임이 있어 회전이 안 걸리거나 늦게 걸렸다. 분기 위치는 신호등
+    기준으로 거의 고정이므로, 인지를 기다리지 말고 **신호등 소실 +
+    1초 직진 + 고정 조향**의 개루프로 확정적으로 꺾는다.
 
-    ⚠️ 강제 회전은 **좌측밴드가 탐지될 때만** 건다. 조건 없이 걸면
-       분기가 없는 곳에서 LEFT 오검출 한 번에 트랙을 벗어난다.
+    ⚠️ 대가는 명확하다 — **LEFT 오검출 한 번에 조건 없이 좌회전한다.**
+       분기가 없는 곳이면 그대로 트랙을 벗어난다. 방어는
+       shortcut_confirm_frames(3) 하나뿐이다. 오발동이 보이면 그 값과
+       light.min_weight_left / min_ratio_left 를 먼저 올릴 것.
+
+    ⚠️ 개루프이므로 진입 속도가 달라지면 회전량이 달라진다. 그래서
+       TURN_IN 은 속도까지 고정한다(turn_speed).
 
     신호등 본체는 먼 거리에서도 안정적으로 잡힌다. 즉 **LEFT 확정 시점이
     신호등에서 몇 m 앞인지가 매번 다르다**(속도·조명·각도에 따라).
@@ -90,19 +100,20 @@ class ShortcutPhase(Enum):
        여기 갇히면 좌회전을 영영 못 한다.
     ──────────────────────────────────────────────────────────
 
-    **TURN_IN/FOLLOW 가 좌측밴드 노란선(offset_*_left)을 본다**
-    (SHIFT 는 평소 추정 + 오프셋만).
+    **좌측밴드 노란선(offset_*_left)은 FOLLOW 에서만 본다.**
+    SHIFT/GO 는 평소 추정 + 오프셋으로 달리고, TURN_IN 은 인지를 아예
+    안 본다(고정 조향).
     분기점에서는 dashed 마스크에 직진 가지와 좌회전 가지가 같이 들어오는데,
-    전부 평균내면 그 사이를 결냥해 어느 쪽도 못 탄다. 행별로 가장 왼쪽
+    전부 평균내면 그 사이를 겨냥해 어느 쪽도 못 탄다. 행별로 가장 왼쪽
     픽셀에서 lane.left_band_px 안쪽만 남기면 좌회전 가지가 선택되고,
     좌회전을 마친 뒤에는 합류 차선을 그대로 따라간다.
 
-    ⚠️ 좌회전 구간에서 노란선을 못 보면 갈 곳이 없다. 그때는
-       driver_node 가 평소 차선 추정으로 폴백한다(lane_valid_left=False).
-       TURN_IN 의 강제 회전도 그때는 걸지 않는다.
+    ⚠️ FOLLOW 에서 노란선을 못 보면 갈 곳이 없다. 그때는 driver_node 가
+       평소 차선 추정으로 폴백한다(lane_valid_left=False).
     """
 
     SHIFT = "SHIFT"
+    GO = "GO"
     TURN_IN = "TURN_IN"
     FOLLOW = "FOLLOW"
 
@@ -117,7 +128,8 @@ class DriveFSM:
 
     def __init__(self, start_confirm_frames=5, enable_shortcut=False,
                  auto_start=False, shortcut_total_sec=15.0,
-                 shortcut_turn_sec=1.5, shortcut_confirm_frames=3,
+                 shortcut_straight_sec=1.0, shortcut_turn_sec=1.5,
+                 shortcut_confirm_frames=3,
                  shortcut_lost_frames=3, shortcut_arm_timeout_sec=5.0,
                  start_on_green=True, start_on_left=False):
         self.start_confirm_frames = start_confirm_frames
@@ -138,8 +150,9 @@ class DriveFSM:
         # 꺾기 시작하면 신호등이 곧 시야를 벗어나 LIGHT_LEFT 가 NONE 이 되는데,
         # 신호 유지로 끊으면 진입 도중에 차선주행으로 돌아가 분기를 놓친다.
         self.shortcut_total_sec = shortcut_total_sec
-        # 신호등을 지난 뒤 **강제 회전** 창의 길이. 이 동안 좌측밴드가
-        # 잡히면 고정 조향으로 밀어넣는다 (안 잡히면 평소 주행 그대로).
+        # 신호등을 지난 뒤 **직진**하는 시간. 분기점 입구까지 가는 거리다.
+        self.shortcut_straight_sec = shortcut_straight_sec
+        # 그 뒤 **고정 조향으로 좌회전**하는 시간. 조건 없이 무조건 돈다.
         self.shortcut_turn_sec = shortcut_turn_sec
         # 좌회전 화살표가 몇 프레임 연속 확정돼야 진입할지.
         self.shortcut_confirm_frames = shortcut_confirm_frames
@@ -223,26 +236,38 @@ class DriveFSM:
                 else:
                     self._left_gone_count += 1
                 if self._left_gone_count >= self.shortcut_lost_frames:
-                    self._phase = ShortcutPhase.TURN_IN
+                    self._phase = ShortcutPhase.GO
                     self._shortcut_t = 0.0      # 총 시간은 여기서부터 센다
                     self._reason = (f"left lost x{self._left_gone_count}"
-                                    f" -> turn in")
+                                    f" -> go straight")
                 elif self._shortcut_t >= self.shortcut_arm_timeout_sec:
                     # 안전장치. 신호등 앞에 섰거나 화살표가 계속 보이는
                     # 각도다. 사라진 것으로 치고 진행한다.
-                    self._phase = ShortcutPhase.TURN_IN
+                    self._phase = ShortcutPhase.GO
                     self._shortcut_t = 0.0
                     self._reason = (f"arm timeout "
                                     f"({self.shortcut_arm_timeout_sec:.0f}s)"
-                                    f" -> turn in")
+                                    f" -> go straight")
 
             else:
-                # TURN_IN / FOLLOW — **신호가 사라져도 끝내지 않는다.
+                # GO / TURN_IN / FOLLOW — **신호가 사라져도 끝내지 않는다.
                 # 총 시간으로만 끊는다.** 꺾기 시작하면 신호등이 곧 시야를
                 # 벗어나 LIGHT_LEFT 가 NONE 이 되는데, 신호 유지로 끊으면
                 # 진입 도중에 차선주행으로 돌아가 분기를 놓친다.
-                if (self._phase is ShortcutPhase.TURN_IN
-                        and self._shortcut_t >= self.shortcut_turn_sec):
+                #
+                # 시각은 GO 시작(= 신호등 소실)부터 하나의 타이머로 잰다:
+                #     0 ~ straight_sec              GO
+                #     ~ straight_sec + turn_sec     TURN_IN
+                #     ~ total_sec                   FOLLOW
+                turn_end = self.shortcut_straight_sec + self.shortcut_turn_sec
+                if (self._phase is ShortcutPhase.GO
+                        and self._shortcut_t >= self.shortcut_straight_sec):
+                    self._phase = ShortcutPhase.TURN_IN
+                    self._reason = (
+                        f"straight done ({self.shortcut_straight_sec:.1f}s) "
+                        f"-> turn in")
+                elif (self._phase is ShortcutPhase.TURN_IN
+                        and self._shortcut_t >= turn_end):
                     self._phase = ShortcutPhase.FOLLOW
                     self._reason = (
                         f"turn in done ({self.shortcut_turn_sec:.1f}s) "

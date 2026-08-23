@@ -170,7 +170,7 @@ class DriverNode(Node):
                 ("fsm.start_confirm_frames", 5),
                 # 좌회전(지름길) 진입 — LEFT 확정 즉시 SHORTCUT 으로 들어가
                 # SHIFT(안쪽으로 붙고 신호등 지날 때까지 대기) ->
-                # TURN_IN(좌측밴드 잡히면 고정 조향 강제 회전) ->
+                # GO(1초 직진) -> TURN_IN(고정 조향 좌회전, 조건 없음) ->
                 # FOLLOW(좌측밴드 추종) 로 shortcut_total_sec 동안 간다.
                 #
                 # ★ [2026-08-23] 기본값을 False -> **True** 로 바꿨다.
@@ -184,6 +184,7 @@ class DriverNode(Node):
                 ("fsm.start_on_green", True),
                 ("fsm.start_on_left", True),
                 ("fsm.shortcut_total_sec", 15.0),
+                ("fsm.shortcut_straight_sec", 1.0),
                 ("fsm.shortcut_turn_sec", 1.5),
                 ("fsm.shortcut_confirm_frames", 5),
                 ("fsm.shortcut_lost_frames", 3),
@@ -257,6 +258,7 @@ class DriverNode(Node):
             start_on_green=g("fsm.start_on_green").value,
             start_on_left=g("fsm.start_on_left").value,
             shortcut_total_sec=g("fsm.shortcut_total_sec").value,
+            shortcut_straight_sec=g("fsm.shortcut_straight_sec").value,
             shortcut_turn_sec=g("fsm.shortcut_turn_sec").value,
             shortcut_confirm_frames=g("fsm.shortcut_confirm_frames").value,
             shortcut_lost_frames=g("fsm.shortcut_lost_frames").value,
@@ -543,15 +545,16 @@ class DriverNode(Node):
             return
 
         # ── 좌회전 강제 회전 (TURN_IN) ──
-        # 신호등을 지난 뒤 shortcut_turn_sec 동안, **좌측밴드가 탐지되면**
-        # 고정 조향으로 밀어넣는다. 분기 초입은 곡선이 급해서 인지 추종만
-        # 으로는 못 꺾고 지나칠 수 있기 때문이다.
+        # 신호등을 지나 1초 직진(GO)한 뒤, **조건 없이** 고정 조향으로
+        # 꺾는다. 인지를 전혀 안 본다 — 순수 개루프다.
         #
-        # ★ 좌측밴드가 안 잡히면 **걸지 않는다.** 근거 없이 꺾으면 분기가
-        #   없는 곳에서 LEFT 오검출 한 번에 트랙을 벗어난다. 그때는 아래
-        #   평소 차선 주행으로 그냥 흘려보낸다.
-        if (self.fsm.shortcut_phase is ShortcutPhase.TURN_IN
-                and self.obs.lane_valid_left):
+        # ★ 예전에는 "좌측밴드가 탐지되면"을 조건으로 걸었으나, 분기
+        #   초입에서 안 잡힐 때 회전이 안 걸리거나 늦게 걸렸다. 분기 위치는
+        #   신호등 기준으로 거의 고정이므로 인지를 기다리지 않고 확정적으로
+        #   꺾는다 (2026-08-23 사용자 결정).
+        #   ⚠️ 대가: LEFT 오검출 한 번에 조건 없이 좌회전한다. 방어는
+        #      shortcut_confirm_frames 하나뿐이다.
+        if self.fsm.shortcut_phase is ShortcutPhase.TURN_IN:
             self._drive_shortcut_turn(dt, state)
             return
 
@@ -578,7 +581,7 @@ class DriverNode(Node):
         # 쓰면 이득 없이 왼쪽으로 편향만 생긴다.
         use_left_band = (
             state is State.SHORTCUT
-            and self.fsm.shortcut_phase is not ShortcutPhase.SHIFT
+            and self.fsm.shortcut_phase is ShortcutPhase.FOLLOW
             and self.obs.lane_valid_left)
         self._use_left_band = use_left_band
         if use_left_band:
@@ -621,7 +624,8 @@ class DriverNode(Node):
         # 부호: target_offset 이 **양수면 차가 트랙 왼쪽**에 선다
         # (lateral.py _offset 주석의 부호 규약과 같다). 그래서 왼쪽으로
         # 옮기려면 **더한다**.
-        if self.fsm.shortcut_phase is ShortcutPhase.SHIFT:
+        if self.fsm.shortcut_phase in (ShortcutPhase.SHIFT,
+                                       ShortcutPhase.GO):
             target_offset += self.shortcut_shift_px
 
         self._target_offset = target_offset
@@ -648,12 +652,11 @@ class DriverNode(Node):
     def _drive_shortcut_turn(self, dt, state):
         """좌회전 강제 회전 — 고정 조향각 + 고정 속도. 인지는 안 본다.
 
-        진입 조건(좌측밴드 탐지)은 호출부가 이미 확인했다. 여기서는 정해진
-        각도만 낸다.
+        조건이 없다 — TURN_IN 위상이면 무조건 도는 개루프다.
 
-        왜 고정값인가: 분기 초입은 곡선이 급해서, 좌측밴드를 보고 있어도
-        인지 추종만으로는 못 꺾고 지나칠 수 있다. 그 1.5초만 밀어넣고
-        궤도에 올라선 뒤(FOLLOW)부터 다시 인지로 넘긴다.
+        왜 고정값인가: 분기 초입은 차선이 한쪽만 보이거나 끊기고, 좌측밴드도
+        안 잡힐 수 있다. 인지를 기다리면 못 꺾고 지나친다. turn_sec 만
+        밀어넣고 궤도에 올라선 뒤(FOLLOW)부터 다시 인지로 넘긴다.
 
         **속도도 같이 고정해야** 회전 반경이 재현된다 — 같은 조향각이라도
         속도가 다르면 반경이 달라진다. 다만 SpeedLimiter 는 통과시킨다.
@@ -669,7 +672,7 @@ class DriverNode(Node):
 
         if self._last_source != "shortcut_turn":
             self.get_logger().info(
-                f"SHORTCUT/TURN_IN — 좌측밴드 탐지, 고정 조향 {angle:+.1f} 로 "
+                f"SHORTCUT/TURN_IN — 고정 조향 {angle:+.1f} 로 "
                 f"강제 회전 ({self.fsm.shortcut_turn_sec:.1f}s)")
             self._last_source = "shortcut_turn"
 
