@@ -78,6 +78,7 @@ class DriveFSM:
     def __init__(self, start_confirm_frames=5, enable_left_turn=False,
                  auto_start=False,
                  left_confirm_frames=1, left_clear_frames=3,
+                 left_clear_delay_sec=0.4,
                  left_speed=12.0,
                  left_straight_sec=1.30, left_turn_sec=1.40,
                  left_exit_sec=7.0, left_exit_offset_px=20.0,
@@ -99,7 +100,9 @@ class DriveFSM:
         self.auto_start = auto_start
 
         self.left_confirm_frames = left_confirm_frames
-        self.left_clear_frames = left_clear_frames
+        self.left_clear_frames = left_clear_frames   # (더 이상 안 쓴다)
+        # 신호등 **본체**가 사라진 뒤 이만큼 더 기다렸다가 직진 시작.
+        self.left_clear_delay_sec = left_clear_delay_sec
         self.left_speed = left_speed
 
         # 위상과 시간은 전부 이쪽이 들고 있다. 이 파일은 트리거만 본다.
@@ -115,6 +118,7 @@ class DriveFSM:
         self._green_count = 0
         self._left_count = 0
         self._left_gone_count = 0
+        self._light_gone_t = 0.0
         # TimedLeftDrive 는 절대시각을 쓴다. FSM 은 ROS 를 모르므로 dt 를
         # 누적해 자체 시계를 만든다 — 단조증가면 충분하다.
         self._t = 0.0
@@ -130,11 +134,12 @@ class DriveFSM:
         self._green_count = 0
         self._left_count = 0
         self._left_gone_count = 0
+        self._light_gone_t = 0.0
         self._t = 0.0
         self.left.reset()
         self._reason = "reset"
 
-    def update(self, light_state, lane_valid, dt=0.0):
+    def update(self, light_state, lane_valid, dt=0.0, light_width=0.0):
         """프레임당 1회. 새 상태를 반환한다.
 
         dt: 직전 호출로부터의 경과 시간(초). 좌회전 위상 시간을 재는 데만 쓴다.
@@ -175,17 +180,23 @@ class DriveFSM:
 
         elif self.state is State.LEFT_TURN:
             if self.left.phase == TimedLeftDrive.WAIT_CLEAR:
-                # 표지가 사라지기를 기다린다. 소실 = 신호등이 화면 위로
-                # 벗어났다 = 지나쳤다는 위치 사건. 시간이 아니라 위치로
-                # 기점을 잡아야 매 랩 같은 지점에서 꺾는다.
-                if light_state == LIGHT_LEFT:
-                    self._left_gone_count = 0
+                # ★ [사용자 2026-08-24] 기점을 **신호등 본체 소실**로 바꿨다.
+                #   예전에는 LEFT **램프**가 clear_frames 만큼 안 보이면
+                #   출발했는데, 램프는 가까워질수록 화각에서 먼저 잘리고
+                #   판독도 흔들려 소실 시점이 매 랩 달랐다.
+                #   traffic_light **본체**는 전 거리에서 conf 0.80~0.88 로
+                #   안정적이라, 그것이 화면에서 사라지는 순간이 훨씬 또렷한
+                #   위치 사건이다 = "신호등을 확실히 지나쳤다".
+                #   거기서 clear_delay_sec 만큼 더 기다린 뒤 직진을 시작한다.
+                if light_width > 0.0:
+                    self._light_gone_t = 0.0
                 else:
-                    self._left_gone_count += 1
-                    if self._left_gone_count >= self.left_clear_frames:
+                    self._light_gone_t += dt
+                    if self._light_gone_t >= self.left_clear_delay_sec:
                         self.left.begin_after_signal(self._t, self.left_speed)
-                        self._reason = (f"left lost x{self._left_gone_count}"
-                                        f" -> straight")
+                        self._reason = (
+                            f"light gone {self._light_gone_t:.2f}s"
+                            f" -> straight")
             else:
                 # STRAIGHT / TURN / EXIT — **신호가 사라져도 끝내지 않는다.
                 # 시간으로만 넘긴다.** 꺾기 시작하면 신호등이 곧 시야를

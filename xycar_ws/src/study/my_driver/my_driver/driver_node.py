@@ -191,6 +191,7 @@ class DriverNode(Node):
                 ("left.confirm_frames", 1),
                 # LEFT 가 아닌 프레임이 몇 번 연속이면 "지나쳤다"로 볼지. 3.
                 ("left.clear_frames", 3),
+                ("left.clear_delay_sec", 0.4),
                 # 좌회전 구간 내내 유지할 속도. WAIT_CLEAR 부터 미리 맞춘다.
                 ("left.speed", 12.0),
                 ("left.straight_sec", 1.30),
@@ -310,6 +311,7 @@ class DriverNode(Node):
             start_on_left=g("fsm.start_on_left").value,
             left_confirm_frames=g("left.confirm_frames").value,
             left_clear_frames=g("left.clear_frames").value,
+            left_clear_delay_sec=g("left.clear_delay_sec").value,
             left_speed=g("left.speed").value,
             left_straight_sec=g("left.straight_sec").value,
             left_turn_sec=g("left.turn_sec").value,
@@ -600,7 +602,8 @@ class DriverNode(Node):
             return
 
         # dt 를 넘겨야 좌회전 위상 시간이 흘러간다.
-        state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt)
+        state = self.fsm.update(self.obs.light, self.obs.lane_valid, dt,
+                                light_width=self.obs.light_width)
 
         # EXIT 진입/이탈을 인지 노드에 알린다 (값이 바뀔 때만).
         exiting = 1 if self.fsm.left_phase == TimedLeftDrive.EXIT else 0
