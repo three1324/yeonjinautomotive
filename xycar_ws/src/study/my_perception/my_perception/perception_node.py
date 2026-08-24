@@ -106,7 +106,21 @@ class PerceptionNode(Node):
                 ("lane.left_band_px", 30.0),
                 ("lane.left_exit_strip_px", 30.0),
                 # 선행 곱률을 평가할 행. 낮을수록 멀리 본다.
-                ("lane.curve_preview_row", 280),
+                # 선행거리를 **미터**로 지정한다. 행은 아래 카메라 상수로
+                # 환산한다 — 카메라를 재장착하면 horizon_row/cam_fh 만 고치면 된다.
+                ("lane.curve_preview_m", 1.7),
+                # 0 이면 위 미터값으로 자동 계산. >0 이면 그 행을 그대로 쓴다.
+                ("lane.curve_preview_row", 0),
+                # 핀홀 근사: X = cam_fh / (row - horizon_row)
+                # ⚠️ 둘 다 **추정치**다. 실측하려면 직선에 정지해
+                #    debug_state 의 half_near/half_far 를 읽고(트랙 반폭=0.40m):
+                #      p_near = half_near/0.40,  p_far = half_far/0.40   [px/m]
+                #      horizon_row = (380*p_far - 310*p_near)/(p_far - p_near)
+                #      cam_fh      = (380 - horizon_row) / p_near * 0.40 ... 의 역수관계
+                #    또는 더 간단히: 앞 1.7m 지점에 물체를 놓고 그게 몇 행에
+                #    찍히는지 본 다음 curve_preview_row 에 직접 넣으면 된다.
+                ("lane.horizon_row", 250.0),
+                ("lane.cam_fh", 75.0),
                 ("lane.min_pts", 50),
                 ("lane.min_span", 20),
                 ("lane.hold_frames", 15),
@@ -263,7 +277,7 @@ class PerceptionNode(Node):
             eval_far=g("lane.eval_far").value,
             center_bias_px=g("lane.center_bias_px").value,
             left_band_px=g("lane.left_band_px").value,
-            curve_preview_row=g("lane.curve_preview_row").value,
+            curve_preview_row=self._preview_row(g),
             min_pts=g("lane.min_pts").value,
             min_span=g("lane.min_span").value,
             hold_frames=g("lane.hold_frames").value,
@@ -274,6 +288,30 @@ class PerceptionNode(Node):
             max_center_offset_px=g("lane.max_center_offset_px").value,
             max_jump_px=g("lane.max_jump_px").value,
         )
+
+    def _preview_row(self, g):
+        """선행거리(m) -> 평가행. curve_preview_row > 0 이면 그것을 쓴다.
+
+        핀홀 근사 X = cam_fh / (row - horizon_row) 을 뒤집은 것이다.
+        y_lo 보다 위로 가면(=더 멀리) 표본 밖 외삽이라 2차항이
+        발산하므로 y_lo 로 클램프하고 경고한다.
+        """
+        row = int(g("lane.curve_preview_row").value)
+        y_lo = int(g("lane.y_lo").value)
+        if row <= 0:
+            hz = float(g("lane.horizon_row").value)
+            fh = float(g("lane.cam_fh").value)
+            m = max(0.1, float(g("lane.curve_preview_m").value))
+            row = int(round(hz + fh / m))
+            self.get_logger().info(
+                f"선행곱률: {m:.2f}m -> {row}행 "
+                f"(horizon {hz:.0f}, cam_fh {fh:.0f})")
+        if row < y_lo:
+            self.get_logger().warn(
+                f"curve_preview_row {row} 이 y_lo {y_lo} 보다 멀다 — "
+                f"표본 밖 외삽이므로 {y_lo} 로 자른다")
+            row = y_lo
+        return row
 
     def on_left_exit(self, msg):
         self._left_exit = bool(int(msg.data))
