@@ -328,7 +328,13 @@ class DriverNode(Node):
             left_confirm_frames=g("left.confirm_frames").value,
             left_clear_frames=g("left.clear_frames").value,
             left_clear_delay_sec=g("left.clear_delay_sec").value,
-            left_speed=g("left.speed").value,
+            # left.speed <= 0 이면 speed.base 를 그대로 쓴다.
+            # 좌회전은 시간으로 재는 개루프라 속도가 흔들리면 꾫는
+            # 지점과 반경이 흔들린다. 그래서 여전히 **고정값**이되,
+            # base 를 바꿀 때 따로 안 고쳐도 따라오게 한 것이다.
+            left_speed=(g("left.speed").value
+                        if g("left.speed").value > 0.0
+                        else g("speed.base").value),
             left_straight_sec=g("left.straight_sec").value,
             left_turn_sec=g("left.turn_sec").value,
             left_exit_sec=g("left.exit_sec").value,
