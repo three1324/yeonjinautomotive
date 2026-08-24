@@ -245,6 +245,8 @@ class DriverNode(Node):
                 ("overtake.recover_ratio", 1.0),
                 # 진입·복귀 첫 순간에 풀록을 때리는 시간. 0 이면 끔다.
                 ("overtake.kick_sec", 0.1),
+                # 복귀(RECOVER) 쪽 풀록 시간. 진입과 따로 둔다.
+                ("overtake.recover_kick_sec", 0.1),
                 # 방금 회피한 라벨이 이만큼 안 보여야 재발동 가능.
                 ("overtake.rearm_sec", 0.5),
                 ("overtake.early_conf", 0.90),
@@ -354,6 +356,7 @@ class DriverNode(Node):
             rearm_sec=g("overtake.rearm_sec").value,
         )
         self.overtake_kick_sec = g("overtake.kick_sec").value
+        self.overtake_recover_kick_sec = g("overtake.recover_kick_sec").value
         # staged_vehicle_entry 문턱. 모델별로 height_ratio 가 다르다.
         self.entry_cfg = {
             "early_conf": g("overtake.early_conf").value,
@@ -787,14 +790,13 @@ class DriverNode(Node):
         #         RECOVER 는 그 반대.
         ot = self.lateral.overtake
         kick = None
-        if self.overtake_kick_sec > 0.0 and ot.active:
+        if ot.active:
             el = ot.elapsed(now_sec)
-            if el < self.overtake_kick_sec:
-                lim = self.steering.angle_limit
-                if ot.phase == ot.PASS:
-                    kick = -ot.direction * lim
-                elif ot.phase == ot.RECOVER:
-                    kick = ot.direction * lim
+            lim = self.steering.angle_limit
+            if ot.phase == ot.PASS and el < self.overtake_kick_sec:
+                kick = -ot.direction * lim
+            elif ot.phase == ot.RECOVER and el < self.overtake_recover_kick_sec:
+                kick = ot.direction * lim
 
         if kick is not None:
             angle = self.steering.follow_external(dt, kick)
