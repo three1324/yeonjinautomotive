@@ -243,6 +243,10 @@ class DriverNode(Node):
                 # 회피 직후 **반대쪽**을 짧게 경유해 자세를 세운다.
                 ("overtake.recover_sec", 0.3),
                 ("overtake.recover_ratio", 1.0),
+                # 진입·복귀 첫 순간에 풀록을 때리는 시간. 0 이면 끔다.
+                ("overtake.kick_sec", 0.1),
+                # 방금 회피한 라벨이 이만큼 안 보여야 재발동 가능.
+                ("overtake.rearm_sec", 0.5),
                 ("overtake.early_conf", 0.90),
                 ("overtake.normal_conf", 0.80),
                 ("overtake.avanten_early_ratio", 0.105),
@@ -347,7 +351,9 @@ class DriverNode(Node):
                 },
             }),
             enable_overtake=g("lateral.enable_overtake").value,
+            rearm_sec=g("overtake.rearm_sec").value,
         )
+        self.overtake_kick_sec = g("overtake.kick_sec").value
         # staged_vehicle_entry 문턱. 모델별로 height_ratio 가 다르다.
         self.entry_cfg = {
             "early_conf": g("overtake.early_conf").value,
@@ -771,7 +777,28 @@ class DriverNode(Node):
 
         speed = self.speed_limiter.update(dt, target_speed)
 
-        if ref.valid:
+        # ── 회피 진입/복귀 순간의 **최대 조향 킥** (2026-08-24) ──
+        # 목표만 옮기면 조향은 rate limit(180도/s)과 LPF 를 거쳐 서서히
+        # 붙는다. 그 사이에도 차는 방해차량 쪽으로 계속 전진한다.
+        # 진입·복귀 첫 kick_sec 동안은 인지를 무시하고 **풀록**을 때려
+        # 자세를 먼저 꺾는다.
+        #   부호: direction +1 = 차를 오른쪽으로. 조향은 양수가 좌회전이므로
+        #         오른쪽으로 가려면 음수 -> kick = -direction * angle_limit.
+        #         RECOVER 는 그 반대.
+        ot = self.lateral.overtake
+        kick = None
+        if self.overtake_kick_sec > 0.0 and ot.active:
+            el = ot.elapsed(now_sec)
+            if el < self.overtake_kick_sec:
+                lim = self.steering.angle_limit
+                if ot.phase == ot.PASS:
+                    kick = -ot.direction * lim
+                elif ot.phase == ot.RECOVER:
+                    kick = ot.direction * lim
+
+        if kick is not None:
+            angle = self.steering.follow_external(dt, kick)
+        elif ref.valid:
             angle = self.steering.update(
                 dt, ref.offset_near, ref.offset_far, target_offset, speed
             )

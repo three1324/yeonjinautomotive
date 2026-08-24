@@ -295,9 +295,23 @@ def staged_vehicle_entry(confidence, height_ratio,
 class LateralPlanner:
     """횡방향 목표 오프셋을 최종 결정한다."""
 
-    def __init__(self, overtake: OvertakeBehavior, enable_overtake=True):
+    def __init__(self, overtake: OvertakeBehavior, enable_overtake=True,
+                 rearm_sec=0.5):
         self.overtake = overtake
         self.enable_overtake = enable_overtake
+        # ── 재무장 (2026-08-24 버그 수정) ────────────────────────────
+        # 증상: 회피가 끝나도 중앙으로 안 오고 2차선으로 계속 달린다.
+        # 원인: 탈출을 **고정시간**으로 바꾸면서, 시간이 다 됐을 때 그 차가
+        #   아직 화면에 보이면 cooldown_sec=0 이라 **곧바로 재발동**한다.
+        #   PASS -> RECOVER -> IDLE -> PASS ... 로 래치가 반복돼 결과적으로
+        #   옆 차선에 눌러앉는다. (팀원 원본은 "그 라벨이 안 보이면" 탈출
+        #   이라 탈출 시점에 이미 차가 없어 이 문제가 없었다.)
+        # 해법: 방금 회피한 **그 라벨**은 rearm_sec 동안 안 보여야 다시
+        #   발동할 수 있다. 다른 차종은 즉시 발동 가능 — 두 번째 차량을
+        #   바로 피해야 하는 코스라 전면 쿨다운은 쓰지 않는다.
+        self.rearm_sec = rearm_sec
+        self._blocked_label = None
+        self._gone_since = None
 
     def blend_waypoint(self, target_offset, waypoint_offset, weight):
         """3단계 확장 지점 — 레이싱 라인 반영.
@@ -334,6 +348,7 @@ class LateralPlanner:
             return 0.0
 
         vehicles = getattr(obs, "vehicles", None) or []
+        self._update_rearm(now, vehicles)
 
         if self.overtake.active:
             # ★ 회피를 시작시킨 **그 라벨**이 이번 프레임에 보이는가만 본다.
@@ -342,7 +357,7 @@ class LateralPlanner:
                        for v in vehicles)
             self.overtake.observe_target(now, same)
         elif entry_cfg is not None:
-            v = self._pick_entry(vehicles, entry_cfg)
+            v = self._pick_entry(vehicles, entry_cfg, self._blocked_label)
             if v is not None:
                 lane = int(v.get("lane", 0))
                 # lane 1 -> 차가 dashed 왼쪽 -> 오른쪽(+1)으로 피한다
@@ -357,18 +372,37 @@ class LateralPlanner:
                     direction_override=direction_override,
                 )
 
-        self.overtake.update(now)
+        was = self.overtake.target_label
+        if self.overtake.update(now) == self.overtake.IDLE and was is not None:
+            # 방금 끝난 라벨을 재무장 대기로 넣는다.
+            self._blocked_label = was
+            self._gone_since = None
         return self.overtake.offset(now)
 
+    def _update_rearm(self, now, vehicles):
+        """차단된 라벨이 rearm_sec 동안 안 보이면 다시 발동 가능하게 푼다."""
+        if self._blocked_label is None:
+            return
+        still = any(int(v["cls"]) == int(self._blocked_label) for v in vehicles)
+        if still:
+            self._gone_since = None
+            return
+        if self._gone_since is None:
+            self._gone_since = now
+        elif now - self._gone_since >= self.rearm_sec:
+            self._blocked_label = None
+            self._gone_since = None
+
     @staticmethod
-    def _pick_entry(vehicles, cfg):
+    def _pick_entry(vehicles, cfg, blocked_label=None):
         """진입 조건을 만족하는 차 중 **height_ratio 가 가장 큰** 것.
 
         가장 가까운 차를 고르는 것이다 — conf 가 아니라 크기로 고른다.
         """
         eligible = [
             v for v in vehicles
-            if staged_vehicle_entry(
+            if int(v["cls"]) != int(blocked_label or -1)
+            and staged_vehicle_entry(
                 v["conf"], v["h_ratio"],
                 cfg["early_conf"], cfg["early_ratio"].get(int(v["cls"]), 1.0),
                 cfg["normal_conf"], cfg["normal_ratio"].get(int(v["cls"]), 1.0),
