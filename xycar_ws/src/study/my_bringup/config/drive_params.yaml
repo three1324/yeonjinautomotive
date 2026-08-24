@@ -1044,10 +1044,10 @@ driver_node:
       # ↑ 정말 가운데일 때 어느 쪽으로 피할지. -1 = 왼쪽.
 
       # --- 회피량 (모델별 · 좌우별 고정 픽셀) ---
-      avanten_left_px: 80.0
-      avanten_right_px: 80.0
-      ionic5_left_px: 80.0
-      ionic5_right_px: 80.0
+      avanten_left_px: 75.0
+      avanten_right_px: 75.0
+      ionic5_left_px: 75.0
+      ionic5_right_px: 75.0
       # ↑ [사용자 2026-08-24] 네 값 모두 **90** 으로 통일.
       #   (팀원 원본은 avanten 65/85, ionic5 70/90 이었다)
       #   ⚠️ 좌우를 다르게 둔 근거가 사라졌다 — "차량이 좌측으로
