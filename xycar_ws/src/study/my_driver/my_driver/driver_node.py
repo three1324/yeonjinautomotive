@@ -302,6 +302,10 @@ class DriverNode(Node):
                 ("speed.cone_factor_min", 0.6),
                 ("speed.overtake_factor", 0.7),
                 ("speed.kick", 7.0),
+                # 출발 직후 이만큼은 저속을 유지한다(0 = 끔다).
+                ("speed.startup_hold_sec", 0.5),
+                # 그때 유지할 속도. 0 이면 kick 값.
+                ("speed.startup_hold_speed", 0.0),
                 # 조향
                 ("steer.k_lat", 0.10),
                 ("steer.k_curve", 0.06),
@@ -448,6 +452,8 @@ class DriverNode(Node):
             decel_per_sec=g("speed.decel_per_sec").value,
             speed_limit=g("speed.limit").value,
             kick=g("speed.kick").value,
+            startup_hold_sec=g("speed.startup_hold_sec").value,
+            startup_hold_speed=g("speed.startup_hold_speed").value,
         )
 
         self.obs = Obs()

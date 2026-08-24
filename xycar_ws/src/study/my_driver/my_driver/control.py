@@ -158,11 +158,22 @@ class SpeedLimiter:
     """
 
     def __init__(self, accel_per_sec, decel_per_sec, speed_limit, kick=0.0,
-                 accel_bounds=None, accel_rates=None):
+                 accel_bounds=None, accel_rates=None,
+                 startup_hold_sec=0.0, startup_hold_speed=0.0):
         self.accel = accel_per_sec
         self.decel = decel_per_sec
         self.speed_limit = speed_limit
         self.kick = kick
+        # ── 출발 직후 저속 유지 (2026-08-24) ──────────────────
+        # kick 으로 데드밴드를 넘은 직후 바로 램프를 타면, 역기전력이
+        # 아직 작은 상태에서 가속 전류가 기동 전류 위에 곹친다.
+        # 잠시 그 속도를 유지해 회전수가 붙은 뒤에 올리면 첨두가 나뉘어진다.
+        # 0 이면 이 기능을 끔다(옆 동작).
+        self.startup_hold_sec = startup_hold_sec
+        # 유지할 속도. 0 이면 kick 값을 그대로 쓴다.
+        self.startup_hold_speed = startup_hold_speed
+        self._hold_t = 0.0
+        self._holding = False
         self._cmd = 0.0
 
         # ── 구간별 가속 (2026-08-24) ───────────────────────────────────
@@ -197,6 +208,8 @@ class SpeedLimiter:
 
     def reset(self):
         self._cmd = 0.0
+        self._hold_t = 0.0
+        self._holding = False
 
     def update(self, dt, target_speed):
         target = _clamp(target_speed, 0.0, self.speed_limit)
@@ -206,7 +219,19 @@ class SpeedLimiter:
         # 가라는 뜻이므로 억지로 밀어올릴 이유가 없다.
         if self._cmd <= 0.0 and target > 0.0 and self.kick > 0.0:
             self._cmd = min(target, self.kick)
+            self._hold_t = 0.0
+            self._holding = self.startup_hold_sec > 0.0
             return self._cmd
+
+        # 출발 직후 저속 유지 — 이 동안은 목표를 hold 속도로 눌러둔다.
+        if self._holding:
+            self._hold_t += dt
+            if self._hold_t >= self.startup_hold_sec:
+                self._holding = False
+            else:
+                cap = (self.startup_hold_speed
+                       if self.startup_hold_speed > 0.0 else self.kick)
+                target = min(target, cap)
 
         if target > self._cmd:
             step = self.accel * max(dt, 1e-3)
