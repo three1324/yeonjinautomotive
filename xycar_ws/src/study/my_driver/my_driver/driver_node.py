@@ -336,7 +336,7 @@ class DriverNode(Node):
                     1: g("overtake.avanten_target_lost_sec").value,
                     2: g("overtake.ionic5_target_lost_sec").value,
                 },
-                "default_offsets": {"left_px": 70.0, "right_px": 90.0},
+                "default_offsets": {"left_px": 90.0, "right_px": 90.0},
                 "offsets_by_label": {
                     1: {"left_px": g("overtake.avanten_left_px").value,
                         "right_px": g("overtake.avanten_right_px").value},
