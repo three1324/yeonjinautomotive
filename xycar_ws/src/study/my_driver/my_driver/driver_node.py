@@ -225,6 +225,11 @@ class DriverNode(Node):
                 ("lateral.shift_left_px", 90.0),
                 ("lateral.shift_right_px", 90.0),
                 ("lateral.lost_hold_sec", 2.5),
+                # HOLD 시간 상한. car_present 가 계속 참이어도 이 시간이
+                # 지나면 무조건 트랙 중앙으로 복귀한다. 0 = 상한 없음.
+                ("lateral.max_hold_sec", 4.0),
+                # 상한으로 끝났을 때의 쿨다운. 0 이면 cooldown_sec 사용.
+                ("lateral.timeout_cooldown_sec", 3.0),
                 ("lateral.cooldown_sec", 1.0),
                 # 종방향
                 ("speed.base", 12.0),
@@ -300,6 +305,8 @@ class DriverNode(Node):
                 shift_left_px=g("lateral.shift_left_px").value,
                 shift_right_px=g("lateral.shift_right_px").value,
                 lost_hold_sec=g("lateral.lost_hold_sec").value,
+                max_hold_sec=g("lateral.max_hold_sec").value,
+                timeout_cooldown_sec=g("lateral.timeout_cooldown_sec").value,
                 cooldown_sec=g("lateral.cooldown_sec").value,
             ),
             enable_overtake=g("lateral.enable_overtake").value,
@@ -815,6 +822,7 @@ class DriverNode(Node):
             "ot_car_side": self.lateral.overtake.car_side,
             "ot_car_cx": round(self.lateral.overtake.car_cx, 1),
             "ot_amount": round(self.lateral.overtake.amount, 1),
+            "ot_hold": round(self.lateral.overtake.hold_elapsed, 1),
             "ot_reason": self.lateral.overtake.last_reason,
             # 지금 이 순간의 차량 관측(기동 여부와 무관). 기동이 안 걸릴 때
             # "차를 아예 못 본 건지, 봤는데 아직 먼 건지"를 가른다.

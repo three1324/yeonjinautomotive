@@ -89,7 +89,8 @@ class OvertakeBehavior:
 
     def __init__(self, trigger_height_px, shift_left_px, shift_right_px,
                  lost_hold_sec=2.5, cooldown_sec=1.0,
-                 trigger_height_ionic_px=None):
+                 trigger_height_ionic_px=None,
+                 max_hold_sec=0.0, timeout_cooldown_sec=0.0):
         # 차량 bbox 높이 임계 (클수록 가까워야 발동). 거리 대용값이다 —
         # 하단 y 는 카메라 피치·노면 기울기에 흔들리지만 높이는 거의 순수하게
         # 거리의 함수다 (cone_zone 의 진입 크기 조건과 같은 근거).
@@ -111,6 +112,25 @@ class OvertakeBehavior:
         self.lost_hold_sec = lost_hold_sec
         self.cooldown_sec = cooldown_sec        # 복귀 후 재발동 금지 시간
 
+        # ── HOLD 시간 상한 (2026-08-24 부활) ────────────────────────────
+        # 왜 다시 넣나: 탈출 조건이 "차가 안 보임" 하나뿐이라,
+        # car_present 가 계속 참이면 **영원히** 옆 차선을 유지한다.
+        # 실차에서 회피 뒤 바깥 차선으로 쭉 달리는 증상이 그것이었다.
+        #
+        # car_present 는 화면 어디든 차가 conf 이상으로 잡히기만 하면 참이다.
+        # "아직 내 앞을 막고 있는가"를 보지 않으므로,
+        #   - 앞에 **두 번째** 방해차량이 보이거나
+        #   - 지나친 차가 화각 구석에 계속 걸리거나
+        #   - YOLO 가 뭔가를 차로 오검출하면
+        # _lost_t 가 매 프레임 0 으로 리셋되어 래치가 풀리지 않는다.
+        #
+        # 0 이면 상한 없음(옛 동작). > 0 이면 그 시간이 지나면 무조건 복귀.
+        self.max_hold_sec = max_hold_sec
+        # 시간 상한으로 끝났을 때의 쿨다운. 0 이면 cooldown_sec 를 그대로 쓴다.
+        # 원인이 지속적인 오검출이면 평소 쿨다운(1s)으로는 곧바로 재래치되어
+        # 중앙<->바깥을 오간다. 그때 이 값을 키워 진동을 죽인다.
+        self.timeout_cooldown_sec = timeout_cooldown_sec
+
         self.phase = OvertakePhase.IDLE
         self._dir = 0        # +1: 오른쪽으로 피함, -1: 왼쪽으로 피함
         # 기동을 시작할 때 **방해차량이 어느 쪽에 있다고 봤는지**.
@@ -122,6 +142,7 @@ class OvertakeBehavior:
         self._amount = 0.0   # 이번 기동의 회피량(픽셀)
         self._cooldown = 0.0
         self._lost_t = 0.0   # 차량을 연속으로 못 본 시간
+        self._hold_t = 0.0   # HOLD 를 유지한 총 시간 (상한 판정용)
         self.last_reason = ""   # 진단용: 왜 시작/종료했는지
 
     def reset(self):
@@ -131,10 +152,16 @@ class OvertakeBehavior:
         self._car_cx = 0.0
         self._amount = 0.0
         self._lost_t = 0.0
+        self._hold_t = 0.0
 
     @property
     def active(self):
         return self.phase is not OvertakePhase.IDLE
+
+    @property
+    def hold_elapsed(self):
+        """현재 HOLD 를 유지한 시간(초). 진단용."""
+        return self._hold_t
 
     @property
     def amount(self):
@@ -188,12 +215,13 @@ class OvertakeBehavior:
         """
         return -self._dir * self._amount
 
-    def _finish(self, why):
+    def _finish(self, why, cooldown=None):
         """기동 종료 + 쿨다운 시작. 목표는 즉시 0(트랙중앙 = 노란선)이 된다."""
+        cd = self.cooldown_sec if cooldown is None else cooldown
         self.reset()
         # 복귀 직후 같은 차가 아직 앞에 있으면 즉시 재발동해 지그재그가 된다.
-        self._cooldown = self.cooldown_sec
-        self.last_reason = f"{why} -> lane center (cooldown {self.cooldown_sec:.1f}s)"
+        self._cooldown = cd
+        self.last_reason = f"{why} -> lane center (cooldown {cd:.1f}s)"
 
     def trigger_for(self, car_cls):
         """이 모델에 쓸 bbox 높이 문턱(px). car_cls: 1=AvanteN, 2=ionic5."""
@@ -224,6 +252,7 @@ class OvertakeBehavior:
                                 else self.shift_left_px)
                 self.phase = OvertakePhase.HOLD
                 self._lost_t = 0.0
+                self._hold_t = 0.0
                 side = "left" if d > 0 else "right"
                 move = "right" if d > 0 else "left"
                 self.last_reason = (
@@ -238,6 +267,7 @@ class OvertakeBehavior:
         # 예전의 "bbox 가 작아짐 / 화면 가장자리로 밀려남 / 시간 상한" 셋은
         # 없앴다 (2026-08-22 사용자 결정). 옆을 스쳐 지나가는 차는 가까워지면서
         # 화면 밖으로 나가므로 앞의 둘은 원래도 잘 안 걸렸다.
+        self._hold_t += dt
         if car_present:
             self._lost_t = 0.0
         else:
@@ -245,6 +275,14 @@ class OvertakeBehavior:
             if self._lost_t >= self.lost_hold_sec:
                 self._finish(f"car gone({self._lost_t:.1f}s)")
                 return 0.0
+
+        # 시간 상한 — car_present 가 계속 참이어도 무조건 복귀한다.
+        # 이게 없으면 오검출 하나로 바깥 차선에 영원히 남는다.
+        if self.max_hold_sec > 0.0 and self._hold_t >= self.max_hold_sec:
+            cd = (self.timeout_cooldown_sec if self.timeout_cooldown_sec > 0.0
+                  else self.cooldown_sec)
+            self._finish(f"max hold({self._hold_t:.1f}s) - car still seen", cooldown=cd)
+            return 0.0
         return self._offset()
 
 
