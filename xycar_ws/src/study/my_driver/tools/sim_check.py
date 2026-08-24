@@ -74,9 +74,18 @@ def make_controllers(a):
         cone_n_lo=2.0, cone_n_hi=8.0, cone_factor_min=0.6,
     )
     lateral = LateralPlanner(
-        OvertakeBehavior(trigger_height_px=55.0,
-                         shift_left_px=70.0, shift_right_px=90.0,
-                         lost_hold_sec=2.0),
+        OvertakeBehavior({
+            "side_deadband_ratio": 0.05,
+            "center_fallback_direction": -1.0,
+            "target_lost_seconds": 0.8,
+            "target_lost_seconds_by_label": {1: 0.8, 2: 0.8},
+            "default_offsets": {"left_px": 70.0, "right_px": 90.0},
+            "offsets_by_label": {
+                1: {"left_px": 65.0, "right_px": 85.0},
+                2: {"left_px": 70.0, "right_px": 90.0},
+            },
+            "cooldown_seconds": 0.0,
+        }),
         enable_overtake=True,
     )
     speed = SpeedLimiter(accel_per_sec=20.0, decel_per_sec=60.0,
@@ -104,12 +113,20 @@ def run(a, offset0, curvature, duration, lane_lost=(), car_at=None, label=""):
             obs.car_present = True
             obs.car_cx = 200.0       # 화면 왼쪽에 차량 -> 오른쪽으로 피해야 함
             obs.car_h = 80.0
+            # lane 1 = 차가 dashed 왼쪽 -> 오른쪽으로 피한다
+            obs.vehicles = [{"cls": 1, "cx": 200.0, "h_ratio": 0.20,
+                             "conf": 0.95, "lane": 1}]
         else:
             obs.car_present = False
+            obs.vehicles = []
 
         offset_far = offset - heading_err * LOOKAHEAD + curvature * CURVE_LOOK
 
-        target_offset = lateral.update(dt, obs, image_width=632)
+        target_offset = lateral.update(
+            t, obs, image_width=632,
+            entry_cfg={"early_conf": 0.90, "normal_conf": 0.80,
+                       "early_ratio": {1: 0.105, 2: 0.080},
+                       "normal_ratio": {1: 0.140, 2: 0.106}})
         target_speed = longitudinal.update(
             lane_valid, offset, offset_far, 1.0 if lane_valid else 0.0,
             0, overtake_active=lateral.overtake.active)

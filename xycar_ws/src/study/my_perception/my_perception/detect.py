@@ -59,6 +59,45 @@ class Detections:
     #   bbox 높이가 다르다. 회피 트리거 문턱을 모델별로 나누려면
     #   어느 모델인지를 판단 쪽으로 알려줘야 한다.
 
+    # ── 모델별 차량 슬롯 (2026-08-24 팀원 구현 이식) ──────────────────
+    # 위의 car_* 는 "가장 conf 높은 차 하나"만 담는다. 팀원 회피는
+    # **모델별로** 문턱과 회피량이 다르고, 둘이 동시에 보일 때
+    # height_ratio 가 큰 쪽을 고르므로 슬롯을 나눠 담아야 한다.
+    #
+    # vehicles[cls_index] = {
+    #     "cls": 1|2, "cx": float, "h": float, "h_ratio": float,
+    #     "conf": float, "lane": 0|1|2,
+    # }
+    #   lane 1 = 차가 dashed **왼쪽**  -> 오른쪽으로 피한다
+    #   lane 2 = 차가 dashed **오른쪽** -> 왼쪽으로 피한다
+    #   lane 0 = 그 프레임에 dashed 를 못 봤다 -> 화면중앙 폴백
+    vehicles: dict = field(default_factory=dict)
+
+
+def merged_instance_x_at_y(instances, target_y):
+    """여러 segmentation 조각을 합친 2차 곡선의 target_y 에서의 x.
+
+    [2026-08-24 이식] 팀원 race_perception/detect.py 그대로.
+    회피 방향을 정할 때 **차량 bbox 하단**에서 중앙 dashed 가 어디인지
+    보려고 쓴다 — 화면 중앙이 아니라 실제 차선 기준으로 좌/우를 가른다.
+
+    lane.py 의 _fit 과 달리 y_lo/y_hi 로 자르지 않는다. 차량 bbox 하단은
+    평가행 범위 밖(화면 아래쪽)일 수 있는데, 거기서 값을 읽어야 하기
+    때문이다. 대신 실제 관측된 y 범위로 clip 해서 외삽을 막는다.
+
+    반환: (x, 실제 평가한 y) 또는 (None, None).
+    """
+    if not instances:
+        return None, None
+    xs = np.concatenate([np.asarray(item[0], dtype=float) for item in instances])
+    ys = np.concatenate([np.asarray(item[1], dtype=float) for item in instances])
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    xs, ys = xs[finite], ys[finite]
+    if xs.size < 3 or float(ys.max() - ys.min()) < 2.0:
+        return None, None
+    eval_y = float(np.clip(target_y, ys.min(), ys.max()))
+    return float(np.polyval(np.polyfit(ys, xs, 2), eval_y)), eval_y
+
 
 def extract(result, names, width, height, dashed_conf, solid_conf,
             cone_conf=0.30, car_conf=0.40, resize_fn=None):
@@ -128,5 +167,36 @@ def extract(result, names, width, height, dashed_conf, solid_conf,
                 det.car_h = y2 - y1      # 회피 트리거의 거리 판단에 쓴다
                 det.car_conf = conf
                 det.car_cls = CAR_NAMES.index(cls) + 1
+
+            # ── 모델별 슬롯 (2026-08-24 팀원 구현 이식) ──
+            # car_conf 게이트를 **여기서는 안 건다.** 팀원의 진입 판정은
+            # staged_vehicle_entry(신뢰도 2단 + height_ratio)로 판단 쪽에서
+            # 하므로, 인지는 원본 conf 를 그대로 넘겨야 한다.
+            cls_idx = CAR_NAMES.index(cls) + 1
+            prev = det.vehicles.get(cls_idx)
+            if prev is None or conf > prev["conf"]:
+                det.vehicles[cls_idx] = {
+                    "cls": cls_idx,
+                    "cx": (x1 + x2) / 2.0,
+                    "h": y2 - y1,
+                    "h_ratio": (y2 - y1) / max(1.0, float(height)),
+                    "conf": conf,
+                    "bottom_y": y2,
+                    "lane": 0,          # dashed 를 본 뒤 아래에서 채운다
+                }
+
+    # ── 회피 방향의 기준: 차량 bbox **하단**에서의 중앙 dashed 위치 ──
+    # [2026-08-24 팀원 구현 이식] 화면 중앙이 아니라 실제 차선으로 좌/우를
+    # 가른다. 차가 트랙 어디에 있든 "저 차는 1차선인가 2차선인가"가
+    # 정확해진다 — 화면 중앙 기준은 우리 차가 이미 옆으로 치우쳐 있으면
+    # 엉뚱한 쪽을 고른다.
+    #   lane 1 = 차가 dashed 왼쪽  -> 오른쪽으로 피한다
+    #   lane 2 = 차가 dashed 오른쪽 -> 왼쪽으로 피한다
+    # dashed 를 못 본 프레임은 lane 0 으로 두고 판단 쪽이 화면중앙으로 폴백.
+    if det.vehicles and det.dashed:
+        for v in det.vehicles.values():
+            dashed_x, _ = merged_instance_x_at_y(det.dashed, v["bottom_y"])
+            if dashed_x is not None:
+                v["lane"] = 1 if v["cx"] < dashed_x else 2
 
     return det

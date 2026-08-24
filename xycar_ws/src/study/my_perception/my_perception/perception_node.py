@@ -16,7 +16,12 @@
              (트랙중앙 ± 반폭/2 = 트랙 반쪽의 중앙)를 만드는 데 쓴다. 0이면 미학습.
     /light   Int32             0=NONE 1=RED 2=YELLOW 3=GREEN 4=LEFT (투표 확정값)
     /objects Float32MultiArray [cone_n, cone_near_y, car_present, car_cx, car_bottom_y,
-                                cone_max_h, car_h, car_cls, light_width]
+                                cone_max_h, car_h, car_cls, light_width,
+                                (모델별 슬롯 x2) cls, cx, h_ratio, conf, lane]
+             마지막 10개는 AvanteN / ionic5 슬롯이다(각 5개).
+             회피는 모델별로 문턱·회피량이 다르고, 둘이 동시에
+             보일 때 height_ratio 가 큰 쪽을 고르므로 슬롯을 나눈다.
+             lane: 1=차가 dashed 왼쪽(오른쪽으로 피함), 2=오른쪽, 0=dashed 못 봄.
              car_cls 는 방해차량 모델 번호(0=없음, 1=AvanteN, 2=ionic5).
              모델마다 차체가 달라 같은 거리에서도 bbox 높이가 다르므로,
              회피 트리거 문턱을 모델별로 나누려고 판단 쪽으로 넘긴다.
@@ -55,6 +60,23 @@ _DEBUG_BOX_COLOR = {
     "traffic_cone": (0, 180, 0),
 }
 _DEBUG_BOX_DEFAULT = (0, 140, 255)
+
+
+def _vehicle_slots(det):
+    """모델별 차량 슬롯을 평탄한 float 리스트로. 순서는 항상 cls 1,2.
+
+    순서를 고정하는 이유: 수신쪽이 인덱스로 읽는다. 없는 모델은
+    cls=0 으로 비워 두어 길이가 항상 같게 유지된다.
+    """
+    out = []
+    for cls_idx in (1, 2):
+        v = det.vehicles.get(cls_idx)
+        if v is None:
+            out += [0.0, 0.0, 0.0, 0.0, 0.0]
+        else:
+            out += [float(v["cls"]), float(v["cx"]), float(v["h_ratio"]),
+                    float(v["conf"]), float(v["lane"])]
+    return out
 
 
 class PerceptionNode(Node):
@@ -332,6 +354,9 @@ class PerceptionNode(Node):
             # 미리 감속하는 데 쓴다. 램프 클래스가 아니라 **신호등 본체**라
             # 색을 못 읽는 거리에서도 잡힐다 — 그게 핵심이다.
             float(det.light_width),
+            # [확장] 모델별 차량 슬롯 2개 × 5필드 (2026-08-24).
+            # 없는 모델은 cls=0 으로 비워 보낸다.
+            *_vehicle_slots(det),
         ]))
 
         if self.publish_debug_image:

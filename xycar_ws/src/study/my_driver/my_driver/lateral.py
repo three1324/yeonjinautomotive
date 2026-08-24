@@ -37,253 +37,197 @@ class OvertakePhase(Enum):
 
 
 class OvertakeBehavior:
-    """방해차량 회피 서브행동. **카메라만 쓴다 (라이다 사용 안 함).**
+    """방해차량 회피. **카메라만 쓴다 (라이다 사용 안 함).**
 
-    ────────────────────────────────────────────────────────────────
-    2026-08-22 개편 — 램프 기동에서 **차선 변경**으로
+    ════════════════════════════════════════════════════════════════
+    [2026-08-24] 팀원 구현(race_control/overtake_drive.OvertakeDrive)을
+    **그대로 이식**했다. 위상·문턱·회피량·탈출조건을 바꾸지 않았다.
 
-    예전에는 5위상(SHIFT->PASS->RETURN->OVERSHOOT->쿨다운)으로 옆으로
-    "벌렸다가" 되돌아왔다. 실차에서 그게 두 가지 문제를 만들었다:
-      - 벌리는 데 0.8초가 걸려, 그 사이에도 차는 방해차량 쪽으로 계속
-        전진한다. 목표가 서서히 옮겨가니 조향도 서서히 붙는다.
-      - 되돌아오는 시점을 관측 셋(멀어짐/가장자리/미검출)으로 재느라
-        판정이 복잡했고, 그 중 둘은 옆을 스쳐가는 차에서 안 걸렸다.
+    이전 자체 구현과 무엇이 달라졌나 (넷 다 실차 증상의 원인이었다):
 
-    지금은 **차선을 바꾸는 동작**으로 본다:
-        트리거 충족 -> 피할 쪽 결정 -> **즉시** 그 오프셋으로 목표를 옮긴다
-                    -> 그 차선을 유지한다 (HOLD)
-                    -> 차가 안 보이는 상태가 lost_hold_sec 지속되면
-                       목표를 0 으로 되돌린다 = 노란선(트랙중앙) 추종
+      1. 회피 **방향**을 화면 중앙이 아니라 **중앙 dashed** 로 정한다.
+         차량 bbox **하단**에서 dashed 를 평가해 그 좌/우로 차선을 가른다.
+             lane 1 = 차가 dashed 왼쪽  -> 오른쪽으로 피한다
+             lane 2 = 차가 dashed 오른쪽 -> 왼쪽으로 피한다
+         화면 중앙 기준은 **우리 차가 이미 옆으로 치우쳐 있으면 틀린다** —
+         회피 중에 두 번째 차를 만나면 특히 그렇다.
+         dashed 를 못 본 프레임만 화면중앙 폴백(deadband 안이면
+         center_fallback_direction).
 
-    "즉시"인 이유: 목표만 계단으로 옮기는 것이고, 실제 차가 계단으로 움직이는
-    것은 아니다. 조향에는 rate limit(180도/s)과 LPF 가 이미 걸려 있어
-    거동은 그쪽이 정한다. 즉 램프를 여기서 또 만들 이유가 없었다.
+      2. 진입 판정이 **2단 신뢰도**다 (staged_vehicle_entry).
+             (conf >= early_conf  AND  h_ratio >= early_ratio)   멀리서: 엄격
+          OR (conf >= normal_conf AND  h_ratio >= normal_ratio)  가까이: 완화
+         거리 대용값도 **화면 높이 대비 비율**(height_ratio)이라 해상도에
+         종속되지 않는다. 옛 구현은 픽셀 절대값(car_h >= 55px)이었다.
 
-    ────────────────────────────────────────────────────────────────
-    왜 라이다를 뺐나 (2026-08-19 실차 결정)
+      3. 탈출 타이머가 **회피를 시작시킨 그 라벨만** 본다 (observe_target).
+         옛 구현은 car_present(=화면에 아무 차나) 로 리셋해서, 앞에 두 번째
+         차가 보이거나 오검출이 하나만 있어도 **영원히 안 풀렸다**.
+         실차에서 "회피 뒤 바깥 차선으로 쭉" 이 정확히 그 증상이다.
 
-    이전에는 라이다 전방거리로 트리거를 교차확인하고 좌/우 여유로 피할
-    쪽을 골랐다. 실차에서 그게 두 가지 문제를 만들었다:
+      4. 탈출 시간이 **0.8초**다 (옛 2.5초). 라벨을 좁혔으니 짧아도 된다.
 
-      1. 라이다가 콘·벽·기둥을 방해차량과 구분하지 못해, 차가 없는데도
-         전방거리가 임계 아래로 떨어지거나 반대로 차가 있는데 섹터를
-         비껴가 트리거가 안 걸렸다.
-      2. 옆으로 벌리는 순간 장애물이 섹터에서 빠져 front_dist 가 커지고,
-         그러면 탈출 조건이 곧바로 참이 돼 회피가 무의미해졌다.
-
-    방해차량인지 아닌지는 **YOLO만 안다**(AvanteN/ionic5 클래스).
-    피할 방향도 카메라로 정한다 — 차가 화면 왼쪽에 있으면 오른쪽으로.
-
-    ────────────────────────────────────────────────────────────────
-    회피량은 **좌/우가 다른 고정값**이다 (2026-08-22 사용자 결정)
-
-    예전에는 학습된 트랙 반폭의 25%(half_near x 0.25)를 썼다. 지금은
-    shift_left_px / shift_right_px 고정이다. 좌우가 다른 이유는 차량이
-    좌측으로 쏠리는 성향이 있어서, 오른쪽으로 피할 때 더 크게 밀어야
-    실제로 같은 만큼 옮겨지기 때문이다(사용자 실차 관측).
-
-    ⚠️ 고정 픽셀이므로 **트랙 폭·원근이 반영되지 않는다.** 반폭 기반이었을
-       때는 목표가 구조적으로 트랙 안쪽이었지만, 지금은 그 보장이 없다 —
-       트랙이 좁은 구간에서는 실선을 넘을 수 있다. 값을 키울 때 특히 주의.
+    ════════════════════════════════════════════════════════════════
+    회피량은 **모델별 · 좌우별** 고정 픽셀이다
+        AvanteN  left 65 / right 85
+        ionic5   left 70 / right 90
+    좌우가 다른 이유는 차량이 좌측으로 쏠리는 성향이 있어 오른쪽으로 피할
+    때 더 크게 밀어야 실제로 같은 만큼 옮겨지기 때문이다(실차 관측).
+    ⚠️ 고정 픽셀이라 트랙 폭·원근이 반영되지 않는다 — 좁은 구간에서는
+       실선을 넘을 수 있다.
     """
 
-    def __init__(self, trigger_height_px, shift_left_px, shift_right_px,
-                 lost_hold_sec=2.5, cooldown_sec=1.0,
-                 trigger_height_ionic_px=None,
-                 max_hold_sec=0.0, timeout_cooldown_sec=0.0):
-        # 차량 bbox 높이 임계 (클수록 가까워야 발동). 거리 대용값이다 —
-        # 하단 y 는 카메라 피치·노면 기울기에 흔들리지만 높이는 거의 순수하게
-        # 거리의 함수다 (cone_zone 의 진입 크기 조건과 같은 근거).
-        #
-        # [2026-08-23] **모델별로 문턱을 나눈다.** 같은 거리라도 AvanteN 과
-        # ionic5 는 차체 크기가 달라 bbox 높이가 다르게 나온다. 문턱이 하나면
-        # 한쪽은 너무 늦게(=너무 가까워서) 발동하고 다른 쪽은 너무 이르게
-        # 발동한다. car_cls(1=AvanteN, 2=ionic5)로 갈라 쓴다.
-        self.trigger_height_px = trigger_height_px          # AvanteN / 미상
-        self.trigger_height_ionic_px = (
-            trigger_height_px if trigger_height_ionic_px is None
-            else trigger_height_ionic_px)                    # ionic5
-        self.shift_left_px = shift_left_px      # 왼쪽으로 피할 때의 오프셋 크기
-        self.shift_right_px = shift_right_px    # 오른쪽으로 피할 때
-        # 차량이 **안 보이는 상태가 이만큼 이어져야** 트랙 중앙으로 되돌아간다.
-        # 한 프레임만 놓쳐도 복귀하면, 옆으로 옮긴 순간 방해차량이 화면 밖으로
-        # 잠깐 나가거나 YOLO 가 한 프레임 놓치는 것만으로 기동이 끝난다.
-        # 그러면 아직 차 옆을 지나는 중인데 중앙으로 돌아와 부딪힌다.
-        self.lost_hold_sec = lost_hold_sec
-        self.cooldown_sec = cooldown_sec        # 복귀 후 재발동 금지 시간
+    IDLE, PASS = range(2)
+    NAMES = ("IDLE", "PASS")
 
-        # ── HOLD 시간 상한 (2026-08-24 부활) ────────────────────────────
-        # 왜 다시 넣나: 탈출 조건이 "차가 안 보임" 하나뿐이라,
-        # car_present 가 계속 참이면 **영원히** 옆 차선을 유지한다.
-        # 실차에서 회피 뒤 바깥 차선으로 쭉 달리는 증상이 그것이었다.
-        #
-        # car_present 는 화면 어디든 차가 conf 이상으로 잡히기만 하면 참이다.
-        # "아직 내 앞을 막고 있는가"를 보지 않으므로,
-        #   - 앞에 **두 번째** 방해차량이 보이거나
-        #   - 지나친 차가 화각 구석에 계속 걸리거나
-        #   - YOLO 가 뭔가를 차로 오검출하면
-        # _lost_t 가 매 프레임 0 으로 리셋되어 래치가 풀리지 않는다.
-        #
-        # 0 이면 상한 없음(옛 동작). > 0 이면 그 시간이 지나면 무조건 복귀.
-        self.max_hold_sec = max_hold_sec
-        # 시간 상한으로 끝났을 때의 쿨다운. 0 이면 cooldown_sec 를 그대로 쓴다.
-        # 원인이 지속적인 오검출이면 평소 쿨다운(1s)으로는 곧바로 재래치되어
-        # 중앙<->바깥을 오간다. 그때 이 값을 키워 진동을 죽인다.
-        self.timeout_cooldown_sec = timeout_cooldown_sec
+    def __init__(self, cfg):
+        self.cfg = cfg
+        if cfg["target_lost_seconds"] <= 0.0:
+            raise ValueError("target_lost_seconds must be positive")
+        self.phase = self.IDLE
+        self.phase_started = 0.0
+        self.direction = -1.0
+        self.cooldown_until = 0.0
+        self.target_last_seen_at = None
+        self.target_label = None
+        self.active_target_lost_seconds = cfg["target_lost_seconds"]
+        self.active_pass_offset_px = 0.0
+        self.offset_source = "idle"
+        self.last_reason = ""
 
-        self.phase = OvertakePhase.IDLE
-        self._dir = 0        # +1: 오른쪽으로 피함, -1: 왼쪽으로 피함
-        # 기동을 시작할 때 **방해차량이 어느 쪽에 있다고 봤는지**.
-        # -1 = 화면 왼쪽, +1 = 오른쪽, 0 = 기동 중 아님. 항상 _dir 의 반대다.
-        # _dir 로부터 유도할 수는 있지만, 시각화에서 "피하는 방향"과 "차가
-        # 있던 방향"을 나란히 보여줘야 부호를 오해하지 않는다.
-        self._car_side = 0
-        self._car_cx = 0.0   # 판단 근거가 된 x중심(픽셀). 진단·시각화용
-        self._amount = 0.0   # 이번 기동의 회피량(픽셀)
-        self._cooldown = 0.0
-        self._lost_t = 0.0   # 차량을 연속으로 못 본 시간
-        self._hold_t = 0.0   # HOLD 를 유지한 총 시간 (상한 판정용)
-        self.last_reason = ""   # 진단용: 왜 시작/종료했는지
-
-    def reset(self):
-        self.phase = OvertakePhase.IDLE
-        self._dir = 0
-        self._car_side = 0
-        self._car_cx = 0.0
-        self._amount = 0.0
-        self._lost_t = 0.0
-        self._hold_t = 0.0
-
+    # ── 진단·시각화용 (driver_node / viz 가 읽는다) ──
     @property
     def active(self):
-        return self.phase is not OvertakePhase.IDLE
+        return self.phase != self.IDLE
 
     @property
-    def hold_elapsed(self):
-        """현재 HOLD 를 유지한 시간(초). 진단용."""
-        return self._hold_t
+    def phase_name(self):
+        return self.NAMES[self.phase]
 
     @property
     def amount(self):
-        """이번 기동의 회피량(픽셀). 진단·시각화용."""
-        return self._amount
+        """이번 기동의 회피량(픽셀)."""
+        return self.active_pass_offset_px
 
     @property
-    def direction(self):
-        """+1 오른쪽 / -1 왼쪽 / 0 없음. 진단·시각화용."""
-        return self._dir
+    def dir_sign(self):
+        """+1 오른쪽으로 피함 / -1 왼쪽으로 피함."""
+        return 1 if self.direction > 0.0 else -1
 
-    @property
-    def car_side(self):
-        """기동 시작 시 방해차량이 있다고 판단한 쪽. -1 왼쪽 / +1 오른쪽 / 0 없음.
+    def reset(self):
+        self.phase = self.IDLE
+        self.target_last_seen_at = None
+        self.target_label = None
+        self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
+        self.active_pass_offset_px = 0.0
+        self.offset_source = "idle"
 
-        진단·시각화 전용 — 제어에는 쓰지 않는다(_dir 이 이미 그 결과다).
+    def trigger(self, now, center_x, image_width, target_label=None,
+                direction_override=None):
+        """회피 시작. 시작했으면 True.
+
+        direction_override: +1 / -1 이면 그 방향으로 확정(중앙 dashed 기준).
+                            None 이면 화면중앙 폴백을 쓴다.
         """
-        return self._car_side
-
-    @property
-    def car_cx(self):
-        """그 판단의 근거가 된 차량 x중심(픽셀). 시작 시점에 고정된다."""
-        return self._car_cx
-
-    def _pick_side(self, car_cx, image_width):
-        """차량 반대쪽으로 피한다. 카메라의 차량 x중심만 본다."""
-        car_on_left = car_cx < image_width / 2.0
-        return 1 if car_on_left else -1         # 차가 왼쪽이면 오른쪽으로
-
-    def _offset(self):
-        """이번 기동의 목표 오프셋(픽셀). **부호가 _dir 과 반대다.**
-
-        ────────────────────────────────────────────────────────────
-        왜 뒤집나 (2026-08-21 버그 수정)
-
-        offset 의 정의가 "트랙중앙 - 화면중심"(lane.py) 이고, 제어기는
-        err = offset_near - target_offset 을 0 으로 몰아간다. 즉 정상상태에서
-        offset_near 가 target_offset 이 된다.
-
-            target_offset > 0  ->  트랙중앙이 화면 오른쪽  ->  차는 트랙 **왼쪽**
-            target_offset < 0  ->                          차는 트랙 **오른쪽**
-
-        그런데 _dir 은 +1 이 "오른쪽으로 피한다"는 뜻이다. 그대로 내보내면
-        오른쪽으로 피하겠다면서 목표는 왼쪽이 된다 — 실차에서 로그에는
-        start right 가 찍히는데 차는 방해차량 쪽으로 붙었다.
-
-        _dir 자체는 뒤집지 않는다. +1=오른쪽 이라는 표기가 로그·시각화
-        (ot_dir, viz 의 AVOID RIGHT/LEFT)에 이미 쓰이고 있어서, 여기서만
-        좌표 규약으로 변환하는 편이 헷갈리지 않는다.
-        ────────────────────────────────────────────────────────────
-        """
-        return -self._dir * self._amount
-
-    def _finish(self, why, cooldown=None):
-        """기동 종료 + 쿨다운 시작. 목표는 즉시 0(트랙중앙 = 노란선)이 된다."""
-        cd = self.cooldown_sec if cooldown is None else cooldown
-        self.reset()
-        # 복귀 직후 같은 차가 아직 앞에 있으면 즉시 재발동해 지그재그가 된다.
-        self._cooldown = cd
-        self.last_reason = f"{why} -> lane center (cooldown {cd:.1f}s)"
-
-    def trigger_for(self, car_cls):
-        """이 모델에 쓸 bbox 높이 문턱(px). car_cls: 1=AvanteN, 2=ionic5."""
-        if int(car_cls) == 2:
-            return self.trigger_height_ionic_px
-        return self.trigger_height_px
-
-    def update(self, dt, car_present, car_cx, car_h, image_width, car_cls=0):
-        """회피로 인한 목표 오프셋 보정량(픽셀)을 반환한다. 평소 0.
-
-        인자에 라이다 값이 없다 — 의도적이다. 클래스 주석 참고.
-        car_cls 는 모델별 트리거 문턱을 고르는 데만 쓴다.
-        """
-        if self.phase is OvertakePhase.IDLE:
-            if self._cooldown > 0.0:
-                self._cooldown = max(0.0, self._cooldown - dt)
-                return 0.0
-
-            # (1) 거리 조건: bbox 높이가 **그 모델의** 임계 이상인가
-            trig = self.trigger_for(car_cls)
-            if car_present and car_h >= trig:
-                # (2) 피할 쪽을 정하고 (3) **즉시** 그 오프셋으로 목표를 옮긴다.
-                d = self._pick_side(car_cx, image_width)
-                self._dir = d
-                self._car_side = -d      # 피하는 쪽의 반대 = 차가 있던 쪽
-                self._car_cx = float(car_cx)
-                self._amount = (self.shift_right_px if d > 0
-                                else self.shift_left_px)
-                self.phase = OvertakePhase.HOLD
-                self._lost_t = 0.0
-                self._hold_t = 0.0
-                side = "left" if d > 0 else "right"
-                move = "right" if d > 0 else "left"
-                self.last_reason = (
-                    f"start: car{int(car_cls)} {side}"
-                    f"(cx{car_cx:.0f} h{car_h:.0f}>={trig:.0f}) -> "
-                    f"move {move} {self._amount:.0f}px")
-                return self._offset()
-            return 0.0
-
-        # HOLD — 옮긴 차선을 그대로 유지한다.
-        # 끝내는 조건은 **하나뿐이다**: 차가 안 보이는 상태가 lost_hold_sec 지속.
-        # 예전의 "bbox 가 작아짐 / 화면 가장자리로 밀려남 / 시간 상한" 셋은
-        # 없앴다 (2026-08-22 사용자 결정). 옆을 스쳐 지나가는 차는 가까워지면서
-        # 화면 밖으로 나가므로 앞의 둘은 원래도 잘 안 걸렸다.
-        self._hold_t += dt
-        if car_present:
-            self._lost_t = 0.0
+        if self.active or now < self.cooldown_until or image_width <= 0:
+            return False
+        reference_x = image_width / 2.0
+        deadband_px = image_width * self.cfg["side_deadband_ratio"]
+        if direction_override is not None:
+            # obstacle_lane 1 -> 오른쪽 2차선, lane 2 -> 왼쪽 1차선.
+            self.direction = 1.0 if float(direction_override) >= 0.0 else -1.0
+        elif center_x < reference_x - deadband_px:
+            self.direction = 1.0
+        elif center_x > reference_x + deadband_px:
+            self.direction = -1.0
         else:
-            self._lost_t += dt
-            if self._lost_t >= self.lost_hold_sec:
-                self._finish(f"car gone({self._lost_t:.1f}s)")
-                return 0.0
+            self.direction = self.cfg["center_fallback_direction"]
+        self.phase, self.phase_started = self.PASS, now
+        self.target_last_seen_at = now
+        self.target_label = target_label
+        per_label = self.cfg.get("target_lost_seconds_by_label", {})
+        self.active_target_lost_seconds = float(
+            per_label.get(target_label, self.cfg["target_lost_seconds"])
+        )
+        if self.active_target_lost_seconds <= 0.0:
+            raise ValueError("active target_lost_seconds must be positive")
+        label_offsets = self.cfg.get("offsets_by_label", {})
+        offsets = label_offsets.get(target_label, self.cfg["default_offsets"])
+        # direction +1=차량 오른쪽 이동, -1=차량 왼쪽 이동.
+        self.active_pass_offset_px = float(
+            offsets["right_px"] if self.direction > 0.0 else offsets["left_px"]
+        )
+        source = "dashed_lane" if direction_override is not None else "screen_fallback"
+        self.offset_source = source + ":" + str(target_label or "vehicle")
+        move = "right" if self.direction > 0.0 else "left"
+        self.last_reason = (
+            f"start {self.offset_source} cx{center_x:.0f} -> "
+            f"move {move} {self.active_pass_offset_px:.0f}px")
+        return True
 
-        # 시간 상한 — car_present 가 계속 참이어도 무조건 복귀한다.
-        # 이게 없으면 오검출 하나로 바깥 차선에 영원히 남는다.
-        if self.max_hold_sec > 0.0 and self._hold_t >= self.max_hold_sec:
-            cd = (self.timeout_cooldown_sec if self.timeout_cooldown_sec > 0.0
-                  else self.cooldown_sec)
-            self._finish(f"max hold({self._hold_t:.1f}s) - car still seen", cooldown=cd)
+    def observe_target(self, now, visible):
+        """회피를 시작시킨 **동일 라벨**의 마지막 검출시각을 갱신한다.
+
+        ★ 여기가 핵심이다. 다른 차종이 보여도 타이머를 갱신하지 않는다.
+          갱신하면 앞의 두 번째 차 하나로 회피가 영원히 안 풀린다.
+        """
+        if self.active and visible:
+            self.target_last_seen_at = now
+
+    def target_missing_seconds(self, now):
+        if self.target_last_seen_at is None:
             return 0.0
-        return self._offset()
+        return max(0.0, now - self.target_last_seen_at)
+
+    def update(self, now):
+        if (self.phase == self.PASS
+                and self.target_missing_seconds(now)
+                >= self.active_target_lost_seconds):
+            gone = self.target_missing_seconds(now)
+            label = self.target_label
+            self.phase = self.IDLE
+            self.cooldown_until = now + self.cfg["cooldown_seconds"]
+            self.target_last_seen_at = None
+            self.target_label = None
+            self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
+            self.active_pass_offset_px = 0.0
+            self.offset_source = "idle"
+            self.last_reason = f"{label} gone({gone:.1f}s) -> lane center"
+        return self.phase
+
+    def offset(self, now):
+        if self.phase == self.PASS:
+            return self.direction * self.active_pass_offset_px
+        return 0.0
+
+    def shift_time(self, seconds):
+        """정지(STOP) 등으로 멈춘 시간만큼 기점을 밀어 위상 시간을 보존한다."""
+        if self.active:
+            self.phase_started += seconds
+        if self.target_last_seen_at is not None:
+            self.target_last_seen_at += seconds
+
+
+def staged_vehicle_entry(confidence, height_ratio,
+                         early_confidence, early_height_ratio,
+                         normal_confidence, normal_height_ratio):
+    """멀리서는 높은 신뢰도, 가까이서는 완화된 신뢰도로 진입한다.
+
+    [2026-08-24 이식] 팀원 race_control/overtake_drive.py 그대로.
+
+    왜 2단인가: 문턱이 하나면 둘 중 하나를 포기해야 한다 —
+      낮게 잡으면 먼 거리의 오검출에 회피가 걸리고,
+      높게 잡으면 진짜 차를 코앞에서야 알아본다.
+    멀리서는 conf 를 엄격히(0.90) 요구하는 대신 작은 크기도 받아주고,
+    가까이서는 크기가 확실하니 conf 를 완화한다(0.80).
+    """
+    return (
+        (float(confidence) >= float(early_confidence)
+         and float(height_ratio) >= float(early_height_ratio))
+        or
+        (float(confidence) >= float(normal_confidence)
+         and float(height_ratio) >= float(normal_height_ratio))
+    )
 
 
 class LateralPlanner:
@@ -303,31 +247,71 @@ class LateralPlanner:
             return target_offset
         return (1.0 - weight) * target_offset + weight * waypoint_offset
 
-    def update(self, dt, obs, image_width, allow_overtake=True):
+    def update(self, now, obs, image_width, allow_overtake=True,
+               entry_cfg=None):
         """obs: driver_node 가 모아 넘기는 관측 묶음. 목표 오프셋(픽셀) 반환.
+
+        [2026-08-24] 팀원 구현 이식으로 시그니처가 바뀌었다 — dt 가 아니라
+        **절대시각 now** 를 받는다. OvertakeDrive 가 타임스탬프 기반이다.
 
         allow_overtake: False 면 이번 tick 은 회피를 하지 않는다. 좌회전 직후
             차단 구간에서 driver_node 가 내린다 (그 파라미터 주석 참고).
-            **차단 중에는 overtake 를 reset 한다** — 좌회전 SHORTCUT 동안 이
-            경로가 아예 안 불렸으므로, 그 전에 기동 중이던 상태가 그대로
-            남아 있을 수 있다. 그걸 들고 복귀하면 엉뚱하게 벌린 채 달린다.
+            **차단 중에는 overtake 를 reset 한다** — 좌회전 동안 이 경로가
+            아예 안 불렸으므로 그 전에 기동 중이던 상태가 남아 있을 수 있다.
 
-        좌회전(지름길)의 목표 오프셋(SHIFT 위상의 +70px)은 여기가 아니라
-        driver_node 가 이 함수의 결과에 더한다 — FSM 위상을 아는 쪽이
-        거기이기 때문이다.
+        entry_cfg: staged_vehicle_entry 문턱 묶음. None 이면 진입 판정을 하지
+            않는다(이미 회피 중일 때의 유지·탈출만 돌린다).
+
+        좌회전 EXIT 의 목표 오프셋은 여기가 아니라 driver_node 가 이 함수의
+        결과에 더한다 — FSM 위상을 아는 쪽이 거기이기 때문이다.
         """
-        target = 0.0   # 기본은 트랙 중앙
-
         if not allow_overtake:
             self.overtake.reset()
-        elif self.enable_overtake:
-            # 카메라 관측만 넘긴다. obs 에는 라이다 값(front_dist 등)도 들어 있지만
-            # 회피는 그걸 쓰지 않는다 (OvertakeBehavior 주석 참고).
-            target += self.overtake.update(
-                dt,
-                obs.car_present, obs.car_cx, obs.car_h,
-                image_width,
-                getattr(obs, "car_cls", 0),
-            )
+            return 0.0
+        if not self.enable_overtake:
+            return 0.0
 
-        return target
+        vehicles = getattr(obs, "vehicles", None) or []
+
+        if self.overtake.active:
+            # ★ 회피를 시작시킨 **그 라벨**이 이번 프레임에 보이는가만 본다.
+            #   다른 차종이 보여도 타이머를 갱신하지 않는다.
+            same = any(int(v["cls"]) == int(self.overtake.target_label or 0)
+                       for v in vehicles)
+            self.overtake.observe_target(now, same)
+        elif entry_cfg is not None:
+            v = self._pick_entry(vehicles, entry_cfg)
+            if v is not None:
+                lane = int(v.get("lane", 0))
+                # lane 1 -> 차가 dashed 왼쪽 -> 오른쪽(+1)으로 피한다
+                # lane 2 -> 차가 dashed 오른쪽 -> 왼쪽(-1)으로 피한다
+                # lane 0 -> dashed 를 못 봤다 -> 화면중앙 폴백(None)
+                direction_override = (
+                    1.0 if lane == 1 else -1.0 if lane == 2 else None
+                )
+                self.overtake.trigger(
+                    now, float(v["cx"]), image_width,
+                    target_label=int(v["cls"]),
+                    direction_override=direction_override,
+                )
+
+        self.overtake.update(now)
+        return self.overtake.offset(now)
+
+    @staticmethod
+    def _pick_entry(vehicles, cfg):
+        """진입 조건을 만족하는 차 중 **height_ratio 가 가장 큰** 것.
+
+        가장 가까운 차를 고르는 것이다 — conf 가 아니라 크기로 고른다.
+        """
+        eligible = [
+            v for v in vehicles
+            if staged_vehicle_entry(
+                v["conf"], v["h_ratio"],
+                cfg["early_conf"], cfg["early_ratio"].get(int(v["cls"]), 1.0),
+                cfg["normal_conf"], cfg["normal_ratio"].get(int(v["cls"]), 1.0),
+            )
+        ]
+        if not eligible:
+            return None
+        return max(eligible, key=lambda x: float(x["h_ratio"]))

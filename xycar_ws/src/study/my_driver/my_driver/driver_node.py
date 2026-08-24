@@ -79,7 +79,7 @@ obstacle_node 자체를 지웠다 (2026-08-21). 시각화만을 위해 라이다
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import rclpy
 from rclpy.node import Node
@@ -142,6 +142,10 @@ class Obs:
     light_width: float = 0.0    # traffic_light 박스 폭(px). 0 = 화면에 없음
 
     cone_max_h: float = 0.0   # 가장 큰 콘 bbox 높이(px). 구간 진입 거리 판단용
+
+    # 모델별 차량 슬롯 (2026-08-24 팀원 회피 이식).
+    # [{'cls':1|2,'cx':px,'h_ratio':0~1,'conf':0~1,'lane':0|1|2}, ...]
+    vehicles: list = field(default_factory=list)
 
     # 라이다 관측(cor_*, front_dist, left_free, right_free)은 여기 없다.
     # 이 노드는 라바콘 구간에서 rubbercone_node 의 완성된 명령(/cone_cmd)만
@@ -217,20 +221,30 @@ class DriverNode(Node):
                 ("cone_cmd_timeout_sec", 0.5),
                 # 횡방향 (회피는 카메라 전용 — 라이다 파라미터 없음)
                 ("lateral.enable_overtake", True),
-                # 회피 트리거 — bbox 높이(px). **모델별로 다르다.**
-                # 같은 거리라도 차체 크기가 달라 높이가 다르게 나온다.
-                # car_cls(=/objects 8번째)로 갈라 쓴다.
-                ("lateral.trigger_height_px", 55.0),        # AvanteN / 미상
-                ("lateral.trigger_height_ionic_px", 40.0),  # ionic5
-                ("lateral.shift_left_px", 90.0),
-                ("lateral.shift_right_px", 90.0),
-                ("lateral.lost_hold_sec", 2.5),
-                # HOLD 시간 상한. car_present 가 계속 참이어도 이 시간이
-                # 지나면 무조건 트랙 중앙으로 복귀한다. 0 = 상한 없음.
-                ("lateral.max_hold_sec", 4.0),
-                # 상한으로 끝났을 때의 쿨다운. 0 이면 cooldown_sec 사용.
-                ("lateral.timeout_cooldown_sec", 3.0),
-                ("lateral.cooldown_sec", 1.0),
+                # ── 회피 (2026-08-24 팀원 OvertakeDrive 그대로 이식) ──
+                # 방향은 화면중앙이 아니라 **차량 bbox 하단의 중앙 dashed**
+                # 로 정한다. 진입은 2단 신뢰도(staged_vehicle_entry).
+                # 탈출은 **회피를 시작시킨 그 라벨**만 보고 0.8초.
+                ("overtake.side_deadband_ratio", 0.05),
+                ("overtake.center_fallback_direction", -1.0),
+                ("overtake.target_lost_sec", 0.8),
+                ("overtake.avanten_target_lost_sec", 0.8),
+                ("overtake.ionic5_target_lost_sec", 0.8),
+                ("overtake.avanten_left_px", 65.0),
+                ("overtake.avanten_right_px", 85.0),
+                ("overtake.ionic5_left_px", 70.0),
+                ("overtake.ionic5_right_px", 90.0),
+                ("overtake.cooldown_sec", 0.0),
+                ("overtake.early_conf", 0.90),
+                ("overtake.normal_conf", 0.80),
+                ("overtake.avanten_early_ratio", 0.105),
+                ("overtake.avanten_normal_ratio", 0.140),
+                ("overtake.ionic5_early_ratio", 0.080),
+                ("overtake.ionic5_normal_ratio", 0.106),
+                # ※ lateral.max_hold_sec / timeout_cooldown_sec 은 삭제됐다.
+                #   그것들은 "회피가 안 풀린다"를 시간으로 막는 대증요법이었고,
+                #   근본 원인(탈출 타이머가 아무 차에나 리셋됨)은 팀원 구현의
+                #   observe_target(동일 라벨만) 으로 사라졌다.
                 # 종방향
                 ("speed.base", 12.0),
                 ("speed.min", 4.0),
@@ -298,19 +312,40 @@ class DriverNode(Node):
         )
         self.cone_cmd_timeout = g("cone_cmd_timeout_sec").value
         self.lateral = LateralPlanner(
-            OvertakeBehavior(
-                trigger_height_px=g("lateral.trigger_height_px").value,
-                trigger_height_ionic_px=g(
-                    "lateral.trigger_height_ionic_px").value,
-                shift_left_px=g("lateral.shift_left_px").value,
-                shift_right_px=g("lateral.shift_right_px").value,
-                lost_hold_sec=g("lateral.lost_hold_sec").value,
-                max_hold_sec=g("lateral.max_hold_sec").value,
-                timeout_cooldown_sec=g("lateral.timeout_cooldown_sec").value,
-                cooldown_sec=g("lateral.cooldown_sec").value,
-            ),
+            OvertakeBehavior({
+                "side_deadband_ratio": g("overtake.side_deadband_ratio").value,
+                "center_fallback_direction": (
+                    1.0 if g("overtake.center_fallback_direction").value >= 0
+                    else -1.0),
+                "target_lost_seconds": g("overtake.target_lost_sec").value,
+                "target_lost_seconds_by_label": {
+                    1: g("overtake.avanten_target_lost_sec").value,
+                    2: g("overtake.ionic5_target_lost_sec").value,
+                },
+                "default_offsets": {"left_px": 70.0, "right_px": 90.0},
+                "offsets_by_label": {
+                    1: {"left_px": g("overtake.avanten_left_px").value,
+                        "right_px": g("overtake.avanten_right_px").value},
+                    2: {"left_px": g("overtake.ionic5_left_px").value,
+                        "right_px": g("overtake.ionic5_right_px").value},
+                },
+                "cooldown_seconds": g("overtake.cooldown_sec").value,
+            }),
             enable_overtake=g("lateral.enable_overtake").value,
         )
+        # staged_vehicle_entry 문턱. 모델별로 height_ratio 가 다르다.
+        self.entry_cfg = {
+            "early_conf": g("overtake.early_conf").value,
+            "normal_conf": g("overtake.normal_conf").value,
+            "early_ratio": {
+                1: g("overtake.avanten_early_ratio").value,
+                2: g("overtake.ionic5_early_ratio").value,
+            },
+            "normal_ratio": {
+                1: g("overtake.avanten_normal_ratio").value,
+                2: g("overtake.ionic5_normal_ratio").value,
+            },
+        }
         self.left_turn_steer_deg = g("left.turn_steer_deg").value
         self.left_overtake_block = g("left.overtake_block_sec").value
         # 남은 회피 차단 시간(초). 좌회전이 끝나는 순간 채워지고 매 tick 준다.
@@ -458,6 +493,22 @@ class DriverNode(Node):
         # — 옆 perception_node 와 섞으면 평소대로 달린다(안전한 방향은 아니다).
         if len(msg.data) >= 9:
             self.obs.light_width = msg.data[8]
+        # 모델별 차량 슬롯 2개 x 5필드. 없으면 빈 리스트 -> 회피가
+        # 아예 안 걸린다(옆 perception_node 와 섞으면 그렇게 된다).
+        vs = []
+        if len(msg.data) >= 19:
+            for base in (9, 14):
+                cls = int(msg.data[base])
+                if cls <= 0:
+                    continue
+                vs.append({
+                    "cls": cls,
+                    "cx": float(msg.data[base + 1]),
+                    "h_ratio": float(msg.data[base + 2]),
+                    "conf": float(msg.data[base + 3]),
+                    "lane": int(msg.data[base + 4]),
+                })
+        self.obs.vehicles = vs
 
 
     def on_cone_cmd(self, msg):
@@ -653,9 +704,12 @@ class DriverNode(Node):
                 self._pub_debug(state.value, 0.0, 0.0, "ref lost")
                 return
 
+        # 팀원 OvertakeDrive 는 **절대시각** 기반이라 dt 가 아니라 now 를 넘긴다.
+        now_sec = now.nanoseconds / 1e9
         target_offset = self.lateral.update(
-            dt, self.obs, self.image_width,
-            allow_overtake=(self._overtake_block_left <= 0.0))
+            now_sec, self.obs, self.image_width,
+            allow_overtake=(self._overtake_block_left <= 0.0),
+            entry_cfg=self.entry_cfg)
 
         # ── 합류(EXIT): 목표선을 본선 쪽으로 서서히 옮긴다 ──
         # EXIT 시작 exit_ramp_sec(0.5s) 동안 0 -> exit_offset_px(+20px).
@@ -778,7 +832,7 @@ class DriverNode(Node):
         """my_debug/pipeline_view_node 용 실시간 상태 스냅샷. 매 tick 발행 —
         문자열 하나 만드는 비용이라 30Hz 로 던져도 무시할 만하다."""
         ref = self._ref
-        ov = self.lateral.overtake.phase.value if self.lateral.overtake.active else "-"
+        ov = self.lateral.overtake.phase_name if self.lateral.overtake.active else "-"
         payload = {
             "state": state_name,
             "angle": round(float(angle), 1),
@@ -815,15 +869,19 @@ class DriverNode(Node):
             "overtake": ov,
             # 회피 기동의 근거를 그대로 노출한다. 화면만 보고 "왜 저쪽으로
             # 피했는가 / 왜 안 피하는가"를 알 수 있어야 튜닝이 가능하다.
-            "ot_dir": self.lateral.overtake.direction,
-            # 회피의 **원인**: 방해차량이 어느 쪽에 있다고 봤는가.
-            # ot_dir(피하는 쪽)과 부호가 반대라 둘을 같이 봐야 판단이 옳았는지
-            # 화면에서 가를 수 있다 (8/21 부호 버그가 바로 이 지점이었다).
-            "ot_car_side": self.lateral.overtake.car_side,
-            "ot_car_cx": round(self.lateral.overtake.car_cx, 1),
+            "ot_dir": self.lateral.overtake.dir_sign,
+            # 회피량과, 방향을 무엇으로 정했는가(dashed_lane / screen_fallback).
+            # "왜 저쪽으로 피했는가"를 화면만 보고 가를 수 있어야 한다.
             "ot_amount": round(self.lateral.overtake.amount, 1),
-            "ot_hold": round(self.lateral.overtake.hold_elapsed, 1),
+            "ot_src": self.lateral.overtake.offset_source,
+            "ot_target": self.lateral.overtake.target_label,
             "ot_reason": self.lateral.overtake.last_reason,
+            # 지금 보이는 차량 슬롯 — 진입이 왜 안 걸리는지 가르는 근거.
+            "veh": [
+                {"c": v["cls"], "hr": round(v["h_ratio"], 3),
+                 "cf": round(v["conf"], 2), "ln": v["lane"]}
+                for v in self.obs.vehicles
+            ],
             # 지금 이 순간의 차량 관측(기동 여부와 무관). 기동이 안 걸릴 때
             # "차를 아예 못 본 건지, 봤는데 아직 먼 건지"를 가른다.
             "car_present": bool(self.obs.car_present),
@@ -847,7 +905,7 @@ class DriverNode(Node):
         if (now - self._last_log).nanoseconds / 1e9 < self._log_period:
             return
         self._last_log = now
-        ov = self.lateral.overtake.phase.value if self.lateral.overtake.active else "-"
+        ov = self.lateral.overtake.phase_name if self.lateral.overtake.active else "-"
         ref = self._ref
         self.get_logger().info(
             f"[{state.value}] angle={angle:+6.1f} speed={speed:5.1f} | "
