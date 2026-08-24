@@ -922,13 +922,21 @@ driver_node:
       #   OR (conf >= normal_conf AND h_ratio >= normal_ratio)  가까이: 완화
       early_conf: 0.90
       normal_conf: 0.80
-      avanten_early_ratio: 0.095
+      avanten_early_ratio: 0.085
       avanten_normal_ratio: 0.130
-      ionic5_early_ratio: 0.070
+      ionic5_early_ratio: 0.062
       ionic5_normal_ratio: 0.096
       # ↑ [사용자 2026-08-24] 네 값 모두 bbox 기준 **5px 낮추었다**
       #   (480px 화면 기준 h_ratio -0.0104). 더 멀리서 피하기 시작한다.
       #   ⚠️ 문턱이 낮을수록 먼 거리의 오검출에도 회피가 걸린다.
+      # ↑ [사용자 2026-08-24] early 두 값을 다시 낮췄다 — 더 멀리서 발동.
+      #     avanten 0.095 -> 0.085 (46px -> 41px, 약 12% 더 멀리)
+      #     ionic5  0.070 -> 0.062 (34px -> 30px, 약 13% 더 멀리)
+      #   early 경로만 낮췄다 — 그쪽은 conf 0.90 을 요구하므로 먼
+      #   거리 오검출 방어가 살아있다. normal(conf 0.80) 은 그대로 둔다.
+      #   ⚠️ 발동이 빨라진 만큼 **pass_sec 타이머도 그만큼 일찍 시작**
+      #      한다. 차에 닿기 전에 시간이 끝나 중앙으로 돌아오면
+      #      avanten_pass_sec / ionic5_pass_sec 을 같이 늘릴 것.
       # ↑ ionic5 문턱이 더 낮다 = **더 멀리서** 피하기 시작한다.
       #   차체가 작아 같은 거리에서 h_ratio 가 작게 나오기 때문이다.
       #   h_ratio = bbox높이 / 화면높이. 480px 화면에서
