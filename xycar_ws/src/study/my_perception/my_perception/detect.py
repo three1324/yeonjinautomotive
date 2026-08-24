@@ -35,10 +35,6 @@ class Detections:
     cone_n: int = 0
     cone_near_y: float = 0.0  # 가장 가까운 콘의 bbox 하단 y (클수록 가깝다)
     cone_max_h: float = 0.0
-    cone_min_h: float = 0.0
-    # ↑ **가장 작은**(=가장 먼) 콘의 bbox 높이(px). cone_n=0 이면 0.0 그대로다.
-    #   구간 이탈 판정에 쓴다 — 남은 콘이 전부 멀어(작아)지면 구간이
-    #   끝나가는 신호로 본다. cone_max_h(진입 판정용)와 반대 극단이다.
     # ↑ 가장 큰 콘의 bbox 높이(px). **구간 진입 트리거의 거리 판단**에 쓴다.
     #   왜 하단 y(cone_near_y)가 아니라 높이인가: 하단 y 는 카메라 피치와 노면
     #   기울기에 흔들리고, 콘이 화면 아래로 잘리면 오히려 작아진다. bbox 높이는
@@ -114,11 +110,9 @@ def extract(result, names, width, height, dashed_conf, solid_conf,
                 det.lamp, det.lamp_conf = cls, conf
         elif cls == "traffic_cone":
             if conf >= cone_conf:
-                h = y2 - y1
                 det.cone_n += 1
                 det.cone_near_y = max(det.cone_near_y, y2)
-                det.cone_max_h = max(det.cone_max_h, h)
-                det.cone_min_h = h if det.cone_n == 1 else min(det.cone_min_h, h)
+                det.cone_max_h = max(det.cone_max_h, y2 - y1)
         elif cls in CAR_NAMES:
             # 방해차량은 **항상 한 대**다(사용자 확인 2026-08-22). 여러 박스가
             # 나오면 conf 가 가장 높은 것 하나만 남긴다 — 원래 규칙 그대로다.

@@ -48,17 +48,11 @@ traffic_cone 클래스로 직접 안다(cone_n). 라이다는 그 구간에서 *
 크기를 쓰는 이유: bbox 높이는 거의 순수하게 거리의 함수다. 하단 y 는 카메라
 피치·노면 기울기에 흔들리고 콘이 화면 아래로 잘리면 오히려 작아진다.
 
-**이탈에도 크기 조건을 둘 수 있다** (exit_min_size_px, 2026-08-24 추가).
-기본값 0 이면 꺼져 있고, 그때는 개수 + 유지시간으로만 나간다 — 이게
-오랫동안 지켜온 기본 설계다: 구간을 빠져나갈 때 남은 콘이 멀어지며
-작아지는 것과, 아직 콘 사이인데 개수만 일시적으로 줄어드는 것을
-크기만으로는 구분하기 어렵다.
-
-켜면(>0) 개수 조건과 **OR**로 묶인다 — 가장 작은(=가장 먼) 콘의 bbox
-높이가 이 값 이하로 떨어지면, 콘 개수가 아직 exit_n 을 넘더라도 이탈
-후보가 된다. "남은 콘이 전부 저 멀리 있다"는 것 자체가 구간이 끝나가는
-신호라고 보는 것이다. exit_hold_sec 은 이 조건에도 똑같이 적용된다 —
-순간적인 오검출로 바로 이탈하지 않는다.
+**이탈에는 크기 조건을 걸지 않는다.** 구간을 빠져나갈 때 남은 콘은 멀어지며
+작아지는데, 크기로도 끊으면 개수 조건보다 먼저 이탈해 아직 콘 사이인 차가
+차선 주행으로 돌아간다. 나가는 판단은 개수 + 유지시간으로만 한다.
+(2026-08-24 크기 조건을 잠깐 추가했다가 같은 날 되돌렸다 — 유지시간을
+1.5s -> 0.8s 로 줄여 반응성을 확보하는 쪽을 택했다.)
 
 ────────────────────────────────────────────────────────────────────────
 히스테리시스와 유지시간이 필요한 이유
@@ -84,17 +78,14 @@ class ConeZoneDetector:
                         0 이면 크기 조건을 끈다(개수만으로 판정).
     exit_n:             이 개수 이하로 떨어지면 이탈 후보 (enter_n 보다 낮게 둘 것)
     exit_hold_sec:      이탈 후보가 된 뒤에도 이 시간만큼은 구간을 유지한다
-    exit_min_size_px:   가장 작은 콘의 bbox 높이가 이 값 이하면 이탈 후보
-                        (개수 조건과 OR). 0 이면 이 조건을 끈다.
     """
 
     def __init__(self, enter_n=8, exit_n=4, exit_hold_sec=1.5,
-                 enter_min_size_px=100.0, exit_min_size_px=0.0):
+                 enter_min_size_px=100.0):
         self.enter_n = enter_n
         self.exit_n = exit_n
         self.exit_hold_sec = exit_hold_sec
         self.enter_min_size_px = enter_min_size_px
-        self.exit_min_size_px = exit_min_size_px
 
         self._active = False
         self._exit_t = 0.0      # 이탈 조건이 연속으로 유지된 시간
@@ -109,12 +100,10 @@ class ConeZoneDetector:
     def active(self):
         return self._active
 
-    def update(self, dt, cone_n, cone_size_px=0.0, cone_min_size_px=0.0):
+    def update(self, dt, cone_n, cone_size_px=0.0):
         """프레임당 1회. 지금이 라바콘 구간인지 반환한다.
 
-        cone_size_px:     가장 큰 콘의 bbox 높이(px). 진입 판정(거리 대용값).
-        cone_min_size_px: 가장 작은 콘의 bbox 높이(px). 이탈 판정에 쓴다
-                          (exit_min_size_px 가 0 초과일 때만).
+        cone_size_px: 가장 큰 콘의 bbox 높이(px). 거리 대용값이다.
         """
         if not self._active:
             near_enough = (self.enter_min_size_px <= 0.0
@@ -129,22 +118,15 @@ class ConeZoneDetector:
                 self.last_reason = f"far(cone {cone_n}, h{cone_size_px:.0f}px)"
             return self._active
 
-        # 구간 안에 있을 때 — 개수 조건 또는 크기 조건(켜져 있으면) OR
-        too_few = cone_n <= self.exit_n
-        too_far = (self.exit_min_size_px > 0.0
-                  and cone_min_size_px > 0.0
-                  and cone_min_size_px <= self.exit_min_size_px)
-        if too_few or too_far:
+        # 구간 안에 있을 때
+        if cone_n <= self.exit_n:
             self._exit_t += dt
             if self._exit_t >= self.exit_hold_sec:
                 self._active = False
                 self._exit_t = 0.0
-                why = "far" if (too_far and not too_few) else "count"
-                self.last_reason = (
-                    f"exit({why}: cone {cone_n}, min_h{cone_min_size_px:.0f}px, "
-                    f"{self.exit_hold_sec:.1f}s)")
+                self.last_reason = f"exit(cone {cone_n}, {self.exit_hold_sec:.1f}s)"
         else:
-            # 어느 조건도 안 걸리면 이탈 타이머를 되돌린다
+            # 콘이 다시 보이면 이탈 타이머를 되돌린다
             self._exit_t = 0.0
 
         return self._active
