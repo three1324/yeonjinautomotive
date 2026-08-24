@@ -11,15 +11,21 @@
                   잡으려 해서 충돌한다. 근거: JETSON_ROS1_DOCKER_MOTOR.md §8-(3)
     slam          SLAM 측위를 같이 띄울지 (기본 false — 1단계에서는 불필요)
 
-    debug            OpenCV 파이프라인 뷰어(카메라 시점)를 띄울지 (기본 **true**)
-    rviz             RViz2(공간 시점)까지 같이 띄울지 (기본 **true**)
+    debug            OpenCV 파이프라인 뷰어(카메라 시점)를 띄울지 (기본 **false**)
+    rviz             RViz2(공간 시점)까지 같이 띄울지 (기본 **false**)
 
-★ [2026-08-22] debug/rviz 기본값을 true 로 바꿨다. **명령 한 줄이면 전부 뜬다:**
-        ros2 launch my_bringup drive.launch.py
-  뜨는 것: 카메라 + 라이다 드라이버, perception_node, rubbercone_node,
-           driver_node, OpenCV 파이프라인 뷰어, RViz2.
-  ⚠️ 시각화는 CPU 를 쓴다. 기록 주행/실전에서는 꺼서 쓸 것:
-        ros2 launch my_bringup drive.launch.py debug:=false rviz:=false
+★ [2026-08-24] debug/rviz 기본값을 **false 로 되돌렸다.**
+  시각화는 CPU 를 쓰는데 이 노드들은 이미 YOLO 추론이 병목이다. 게다가
+  debug/rviz 를 켜면 perception_node 가 /debug_image 까지 그리므로,
+  추론 위에 그리기 비용이 더해져 제어 주기가 흔들린다.
+  실전·기록 주행이 기본이므로 꺼진 쪽이 기본값이어야 한다.
+
+        ros2 launch my_bringup drive.launch.py                # 시각화 없음(기본)
+        ros2 launch my_bringup drive.launch.py debug:=true    # OpenCV 뷰어만
+        ros2 launch my_bringup drive.launch.py rviz:=true     # RViz2 까지
+
+  뜨는 것(기본): 카메라 + 라이다 드라이버, perception_node,
+                 rubbercone_node, driver_node.
 
 안전: **이 launch 만으로 주행 준비가 끝난다** (require_enable=false, 2026-08-22).
       /drive_enable 을 따로 쏠 필요가 없다. 안전장치가 사라진 게 아니라
@@ -92,14 +98,15 @@ def generate_launch_description():
         DeclareLaunchArgument('sensors', default_value='true'),
         DeclareLaunchArgument('motor', default_value='false'),
         DeclareLaunchArgument('slam', default_value='false'),
-        # [2026-08-22] 기본값 false -> **true**. 명령 한 줄로 전부 뜨게 한다.
-        #   ros2 launch my_bringup drive.launch.py
-        # 끄려면: ros2 launch my_bringup drive.launch.py debug:=false rviz:=false
-        # ⚠️ 시각화는 CPU 를 쓴다. 기록 주행/실전에서는 꺼서 쓸 것.
-        DeclareLaunchArgument('debug', default_value='true'),
+        # [2026-08-24] 기본값 true -> **false**. 실전은 꺼져 있어야 한다.
+        #   켜려면: ros2 launch my_bringup drive.launch.py debug:=true
+        # ⚠️ 켜면 perception_node 가 /debug_image 까지 그리므로 YOLO 추론
+        #    위에 그리기 비용이 더해져 제어 주기가 흔들린다.
+        DeclareLaunchArgument('debug', default_value='false'),
         # RViz2(공간 시점: 라이다 포인트클라우드/오도메트리/경로)까지 같이 띄운다.
         # 켜면 debug 와 무관하게 /debug_image 도 자동으로 켜진다(위 show_debug_image).
-        DeclareLaunchArgument('rviz', default_value='true'),
+        # [2026-08-24] 기본값 true -> **false**.
+        DeclareLaunchArgument('rviz', default_value='false'),
     ]
 
     # --- 센서 드라이버 ---
