@@ -40,6 +40,11 @@ class LongitudinalPlanner:
         quality_lo, quality_factor_min,
         cone_n_lo, cone_n_hi, cone_factor_min,
         overtake_factor=0.7,
+        curve_preview_lo=60.0,
+        curve_preview_hi=260.0,
+        curve_preview_factor_min=0.55,
+        curve_preview_release_lo=40.0,
+        curve_preview_release_hi=100.0,
     ):
         self.base_speed = base_speed
         self.min_speed = min_speed
@@ -63,6 +68,14 @@ class LongitudinalPlanner:
         # 이 구간에서 우리가 가진 유일한 전방 정보는 카메라 bbox 뿐이라
         # (라이다 상한을 제거했다 — 모듈 docstring 참고) 명시적으로 눌러둔다.
         self.overtake_factor = overtake_factor
+        # 선행 곱률 감속 — 곱선 **진입 전**에 미리 줄이는 항.
+        self.curve_preview_lo = curve_preview_lo
+        self.curve_preview_hi = curve_preview_hi
+        self.curve_preview_factor_min = curve_preview_factor_min
+        # 선행 감속을 **푸는** 문턱(bend 기준). bend 는 지금 눈앞의
+        # 휘어짐이므로 이게 커졌다 = **이미 곱선 안**이라는 뜻이다.
+        self.curve_preview_release_lo = curve_preview_release_lo
+        self.curve_preview_release_hi = curve_preview_release_hi
 
         self.last_reason = ""
 
@@ -75,12 +88,37 @@ class LongitudinalPlanner:
         return None
 
     def update(self, lane_valid, offset_near, offset_far, quality,
-               cone_n, overtake_active=False):
+               cone_n, overtake_active=False, curve_px=0.0):
         """목표 속도를 반환한다 (xycar_motor 의 speed 단위)."""
         v = self.base_speed
         reasons = []
 
         # 1) 곡률 감속 — 전방주시행과 근거리행의 차이가 곧 앞의 휘어짐
+        # 1-a) **선행** 곱률 감속 (2026-08-24 신규)
+        #   curve_px 는 2차피팅 a 계수 기반이라 횟편차·헤딩에 불변이고,
+        #   y_lo~y_hi 전구간(약 0.46~3.75m)을 본다. bend(전방 1.25m 한 점)
+        #   보다 훨씬 먼저 오르므로 **곱선에 들어가기 전**에 감속한다.
+        #   그러면 아래 curve_factor_min 을 높게 두고도 안전해진다
+        #   = **미리 줄이고 곱선 안에서는 빨리** 통과.
+        bend0 = abs(offset_far - offset_near)
+        pv = abs(curve_px)
+        f = _lerp_factor(pv, self.curve_preview_lo, self.curve_preview_hi,
+                         1.0, self.curve_preview_factor_min)
+        # ★ 곱선 **안**에 들어오면 선행 감속을 푸는다.
+        #   안 풀면 선행과 곱률 감속이 **곱해져** 곱선 안이 오히려
+        #   접근보다 느려진다 — 원하는 것의 정반대다.
+        #   curve_px 는 곱선 안에서도 크게 남아 있으므로 그것만으로는
+        #   "접근 중"과 "안에 있음"을 구분할 수 없다. bend(눈앞의
+        #   휘어짐)가 그 판별자다:
+        #       curve_px 크고 bend 작다  -> 곱선이 다가온다 -> 감속
+        #       curve_px 크고 bend 크다  -> 이미 곱선 안   -> 해제
+        strength = _lerp_factor(bend0, self.curve_preview_release_lo,
+                                self.curve_preview_release_hi, 1.0, 0.0)
+        f = 1.0 - (1.0 - f) * strength
+        if f < 0.99:
+            reasons.append(f"preview({pv:.0f}px)")
+        v *= f
+
         bend = abs(offset_far - offset_near)
         f = _lerp_factor(bend, self.curve_px_lo, self.curve_px_hi, 1.0, self.curve_factor_min)
         if f < 0.99:

@@ -8,7 +8,10 @@
 발행:
     /lane    Float32MultiArray [offset_near, offset_far, valid, quality,
                                half_near, half_far,
-                               offset_near_left, offset_far_left, valid_left]
+                               offset_near_left, offset_far_left, valid_left,
+                               curve_px]
+             curve_px 는 **선행 곱률**(2차피팅 a 계수 기반). 횟편차·헤딩에
+             불변이고 bend 보다 훨씬 멀리 본다. 곱선 진입 전 감속용.
              *_left 는 **가장 왼쪽 노란픽셀 밴드**(lane.left_band_px)만으로
              만든 추정이다. 좌회전 분기에서 직진 가지와 좌회전 가지가 같이
              보일 때 좌회전 쪽을 고른다. SHORTCUT 상태에서만 쓰인다.
@@ -102,6 +105,8 @@ class PerceptionNode(Node):
                 ("lane.center_bias_px", 0.0),
                 ("lane.left_band_px", 30.0),
                 ("lane.left_exit_strip_px", 30.0),
+                # 선행 곱률을 평가할 행. 낮을수록 멀리 본다.
+                ("lane.curve_preview_row", 280),
                 ("lane.min_pts", 50),
                 ("lane.min_span", 20),
                 ("lane.hold_frames", 15),
@@ -258,6 +263,7 @@ class PerceptionNode(Node):
             eval_far=g("lane.eval_far").value,
             center_bias_px=g("lane.center_bias_px").value,
             left_band_px=g("lane.left_band_px").value,
+            curve_preview_row=g("lane.curve_preview_row").value,
             min_pts=g("lane.min_pts").value,
             min_span=g("lane.min_span").value,
             hold_frames=g("lane.hold_frames").value,
@@ -330,6 +336,8 @@ class PerceptionNode(Node):
             float(lane.offset_near_left),
             float(lane.offset_far_left),
             1.0 if lane.valid_left else 0.0,
+            # [확장] 선행 곱률(px). 없으면 0.0 이라 선행 감속이 안 걸린다.
+            float(lane.curve_px),
         ]))
         self.pub_light.publish(Int32(data=int(state)))
         self.pub_objects.publish(Float32MultiArray(data=[

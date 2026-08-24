@@ -142,6 +142,7 @@ class Obs:
     light_width: float = 0.0    # traffic_light 박스 폭(px). 0 = 화면에 없음
 
     cone_max_h: float = 0.0   # 가장 큰 콘 bbox 높이(px). 구간 진입 거리 판단용
+    curve_px: float = 0.0     # 선행 곱률(px). 곱선 진입 전 감속에 쓴다
 
     # 모델별 차량 슬롯 (2026-08-24 팀원 회피 이식).
     # [{'cls':1|2,'cx':px,'h_ratio':0~1,'conf':0~1,'lane':0|1|2}, ...]
@@ -287,6 +288,13 @@ class DriverNode(Node):
                 ("speed.curve_px_lo", 30.0),
                 ("speed.curve_px_hi", 150.0),
                 ("speed.curve_factor_min", 0.45),
+                # 선행 곱률 감속 — 곱선 **진입 전**에 미리 줄인다.
+                ("speed.curve_preview_lo", 60.0),
+                ("speed.curve_preview_hi", 260.0),
+                ("speed.curve_preview_factor_min", 0.55),
+                # bend 가 이만큼 커지면 "이미 곱선 안"으로 보고 선행감속 해제.
+                ("speed.curve_preview_release_lo", 40.0),
+                ("speed.curve_preview_release_hi", 100.0),
                 ("speed.quality_lo", 0.4),
                 ("speed.quality_factor_min", 0.5),
                 ("speed.cone_n_lo", 2.0),
@@ -404,6 +412,11 @@ class DriverNode(Node):
             curve_px_lo=g("speed.curve_px_lo").value,
             curve_px_hi=g("speed.curve_px_hi").value,
             curve_factor_min=g("speed.curve_factor_min").value,
+            curve_preview_lo=g("speed.curve_preview_lo").value,
+            curve_preview_hi=g("speed.curve_preview_hi").value,
+            curve_preview_factor_min=g("speed.curve_preview_factor_min").value,
+            curve_preview_release_lo=g("speed.curve_preview_release_lo").value,
+            curve_preview_release_hi=g("speed.curve_preview_release_hi").value,
             quality_lo=g("speed.quality_lo").value,
             quality_factor_min=g("speed.quality_factor_min").value,
             cone_n_lo=g("speed.cone_n_lo").value,
@@ -509,6 +522,10 @@ class DriverNode(Node):
             self.obs.offset_near_left = msg.data[6]
             self.obs.offset_far_left = msg.data[7]
             self.obs.lane_valid_left = msg.data[8] > 0.5
+        # 선행 곱률. 없으면 0.0 이라 선행 감속이 안 걸린다
+        # (옆 perception_node 와 섞으면 곱선 전 감속만 사라진다).
+        if len(msg.data) >= 10:
+            self.obs.curve_px = msg.data[9]
         self._last_lane_time = self.get_clock().now()
 
 
@@ -774,6 +791,7 @@ class DriverNode(Node):
             ref.valid, ref.offset_near, ref.offset_far,
             ref.quality, self.obs.cone_n,
             overtake_active=self.lateral.overtake.active,
+            curve_px=self.obs.curve_px,
         )
 
         # ── 신호등 접근 감속 (2026-08-24) ──
@@ -925,6 +943,7 @@ class DriverNode(Node):
             # 구간 진입 트리거의 거리 조건. cone_n 은 찼는데 이게 작아서 안
             # 들어가는 상황을 화면에서 바로 구분하려면 같이 보여야 한다.
             "cone_h": round(self.obs.cone_max_h, 0),
+            "curve_px": round(self.obs.curve_px, 0),
             "zone_why": self.cone_zone.last_reason,
             # 좌회전(지름길) 위상과 그 위상의 남은 시간. 위상이 "-" 면 그
             # 구간이 아니다. SHIFT(왼쪽으로 붙는 중)인지 FOLLOW(좌측밴드

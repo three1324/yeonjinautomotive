@@ -56,6 +56,20 @@ class LaneResult:
     half_near: float = 0.0
     half_far: float = 0.0
 
+    # 선행 곱률 신호(px). 2차 피팅 x=a*y^2+b*y+c 의 a 로 만든다:
+    #     curve_px = a * (curve_preview_row - eval_near)^2
+    #   = "선행행까지 갔을 때 차선이 접선에서 몇 px 휘는가"
+    #
+    # ★ bend(offset_far-offset_near) 와 결정적으로 다른 점:
+    #   x(v) 를 분해하면 횟편차 y 는 v 에 **선형**, 헤딩은 **상수**,
+    #   곱률만 **2차**로 들어간다. 그래서 a 는 횟편차·헤딩에 불변이다.
+    #   (합성검증: 같은 곱률에서 횟편차 ±20cm 흔들기 —
+    #    a 변동 0.0% / bend 변동 108.8%)
+    #   또 bend 는 eval_far(전방 ~1.25m) 한 점만 보지만, 피팅은
+    #   y_lo~y_hi 전구간(약 0.46~3.75m)을 쓴다 = 훨씬 멀리 본다.
+    # 부호가 있다(좌/우). 속도 계획은 abs 를 쓴다.
+    curve_px: float = 0.0
+
     # --- 좌회전(지름길) 전용: **가장 왼쪽 노란픽셀 밴드**만 쓴 추정 ---
     # 분기점에서는 dashed 마스크에 직진 노란선과 좌회전 노란선이 **둘 다**
     # 들어온다. 전부 평균내면 그 사이 어딘가를 겨냥해 어느 쪽도 못 탄다.
@@ -202,6 +216,7 @@ class LaneEstimator:
         max_center_offset_px=480.0,
         max_jump_px=250.0,
         left_band_px=30.0,
+        curve_preview_row=280,
     ):
         self.width = width
         self.height = height
@@ -239,6 +254,9 @@ class LaneEstimator:
         self.max_jump_px = max_jump_px
         # 좌회전 전용 밴드 폭(px). 0 이면 좌측밴드 추정을 끈다.
         self.left_band_px = left_band_px
+        # 선행 곱률을 평가할 행. **낮을수록 멀리 본다.**
+        # y_lo 보다 낮게 두면 표본 밖 외삽이 된다.
+        self.curve_preview_row = curve_preview_row
 
         self._half = {eval_near: None, eval_far: None}
         # 잠그기 전까지 모으는 표본과, 잠금 여부.
@@ -252,6 +270,7 @@ class LaneEstimator:
         self._last = LaneResult(0.0, 0.0, False, 0.0)
         self._miss = 0
         self._rejected = 0                  # 이상치로 버린 횟수 (진단용)
+        self._curve_px = 0.0                # 선행 곱률 직전값
 
     def reset(self):
         self._half = {self.eval_near: None, self.eval_far: None}
@@ -308,6 +327,26 @@ class LaneEstimator:
         """이 행에서 쓸 반폭. 고정값이 있으면 그것이 최우선."""
         fixed = self.half_fixed.get(row, 0.0)
         return fixed if fixed > 0.0 else self._half[row]
+
+    def _curvature_px(self, f_dashed, f_left, f_right):
+        """선행행에서의 곱률 신호(px). 근거가 없으면 직전값 유지.
+
+        dashed 가 1순위다(성공률 97%, 트랙중앙과 3px 일치). 없으면
+        좌/우 흰선의 a 를 평균낸다 — 둘은 평행이라 곱률이 같다.
+        """
+        a = None
+        if f_dashed is not None:
+            a = float(f_dashed[0])
+        elif f_left is not None and f_right is not None:
+            a = (float(f_left[0]) + float(f_right[0])) / 2.0
+        elif f_left is not None:
+            a = float(f_left[0])
+        elif f_right is not None:
+            a = float(f_right[0])
+        if a is None:
+            return self._curve_px
+        d = float(self.curve_preview_row - self.eval_near)
+        return a * d * d
 
     def _center_at(self, row, f_dashed, f_left, f_right):
         """평가행에서 트랙 중앙 x와 quality. 행별 반폭 EMA도 갱신한다."""
@@ -390,6 +429,7 @@ class LaneEstimator:
         f_left = _fit(left, self.y_lo, self.y_hi, self.min_pts, self.min_span)
         f_right = _fit(right, self.y_lo, self.y_hi, self.min_pts, self.min_span)
 
+        self._curve_px = self._curvature_px(f_dashed, f_left, f_right)
         c_near, q_near = self._center_at(self.eval_near, f_dashed, f_left, f_right)
         c_far, q_far = self._center_at(self.eval_far, f_dashed, f_left, f_right)
 
@@ -416,6 +456,7 @@ class LaneEstimator:
                     offset_near_left=self._last.offset_near_left,
                     offset_far_left=self._last.offset_far_left,
                     valid_left=False,
+                    curve_px=self._curve_px,
                 )
             return self._last
 
@@ -447,5 +488,6 @@ class LaneEstimator:
             offset_near_left=off_n_lb,
             offset_far_left=off_f_lb,
             valid_left=valid_left,
+            curve_px=self._curve_px,
         )
         return self._last
