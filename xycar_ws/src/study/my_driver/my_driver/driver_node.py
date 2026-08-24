@@ -235,6 +235,11 @@ class DriverNode(Node):
                 ("overtake.ionic5_left_px", 70.0),
                 ("overtake.ionic5_right_px", 90.0),
                 ("overtake.cooldown_sec", 0.0),
+                # 회피 유지시간(모델별 고정). 이 시간이 지나면 차가
+                # 보이든 말든 무조건 트랙 중앙으로 복귀한다.
+                ("overtake.pass_sec", 2.0),
+                ("overtake.avanten_pass_sec", 2.0),
+                ("overtake.ionic5_pass_sec", 1.0),
                 ("overtake.early_conf", 0.90),
                 ("overtake.normal_conf", 0.80),
                 ("overtake.avanten_early_ratio", 0.105),
@@ -330,6 +335,11 @@ class DriverNode(Node):
                         "right_px": g("overtake.ionic5_right_px").value},
                 },
                 "cooldown_seconds": g("overtake.cooldown_sec").value,
+                "pass_seconds": g("overtake.pass_sec").value,
+                "pass_seconds_by_label": {
+                    1: g("overtake.avanten_pass_sec").value,
+                    2: g("overtake.ionic5_pass_sec").value,
+                },
             }),
             enable_overtake=g("lateral.enable_overtake").value,
         )
@@ -875,6 +885,8 @@ class DriverNode(Node):
             "ot_amount": round(self.lateral.overtake.amount, 1),
             "ot_src": self.lateral.overtake.offset_source,
             "ot_target": self.lateral.overtake.target_label,
+            "ot_hold": round(self.lateral.overtake.elapsed(
+                self.get_clock().now().nanoseconds / 1e9), 1),
             "ot_reason": self.lateral.overtake.last_reason,
             # 지금 보이는 차량 슬롯 — 진입이 왜 안 걸리는지 가르는 근거.
             "veh": [

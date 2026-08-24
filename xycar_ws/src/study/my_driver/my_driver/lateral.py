@@ -92,6 +92,7 @@ class OvertakeBehavior:
         self.target_label = None
         self.active_target_lost_seconds = cfg["target_lost_seconds"]
         self.active_pass_offset_px = 0.0
+        self.active_pass_seconds = cfg.get("pass_seconds", 0.0)
         self.offset_source = "idle"
         self.last_reason = ""
 
@@ -120,6 +121,7 @@ class OvertakeBehavior:
         self.target_label = None
         self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
         self.active_pass_offset_px = 0.0
+        self.active_pass_seconds = self.cfg.get("pass_seconds", 0.0)
         self.offset_source = "idle"
 
     def trigger(self, now, center_x, image_width, target_label=None,
@@ -157,12 +159,17 @@ class OvertakeBehavior:
         self.active_pass_offset_px = float(
             offsets["right_px"] if self.direction > 0.0 else offsets["left_px"]
         )
+        # ★ [사용자 2026-08-24] 유지시간도 **모델별 고정**이다.
+        per_sec = self.cfg.get("pass_seconds_by_label", {})
+        self.active_pass_seconds = float(
+            per_sec.get(target_label, self.cfg.get("pass_seconds", 0.0)))
         source = "dashed_lane" if direction_override is not None else "screen_fallback"
         self.offset_source = source + ":" + str(target_label or "vehicle")
         move = "right" if self.direction > 0.0 else "left"
         self.last_reason = (
             f"start {self.offset_source} cx{center_x:.0f} -> "
-            f"move {move} {self.active_pass_offset_px:.0f}px")
+            f"move {move} {self.active_pass_offset_px:.0f}px "
+            f"for {self.active_pass_seconds:.1f}s")
         return True
 
     def observe_target(self, now, visible):
@@ -180,10 +187,25 @@ class OvertakeBehavior:
         return max(0.0, now - self.target_last_seen_at)
 
     def update(self, now):
+        """프레임당 1회. 위상을 갱신하고 현재 위상을 반환한다.
+
+        ★ [사용자 결정 2026-08-24] 탈출을 **고정 시간**으로 바꿨다.
+          팀원 원본은 "회피를 시작시킨 라벨이 target_lost_seconds(0.8s)
+          동안 안 보이면" 복귀였다. 지금은 **차가 보이든 말든**
+          pass_seconds 가 지나면 무조건 복귀한다.
+
+          왜: 탈출이 관측에 걸려 있으면 오검출·두 번째 차량 하나로
+          복귀가 늦어지거나 아예 안 된다(실차 증상). 고정 시간은
+          그 의존을 통째로 끊는다 — 코스가 정해져 있으므로 "얼마나
+          비켜서 얼마나 가야 하는지"를 직접 정하는 편이 재현성이 높다.
+
+          ⚠️ 대가: 그 시간 안에 실제로 못 지나가면 아직 차 옆인데
+             중앙으로 돌아온다. pass_seconds 는 **실제 추월에 필요한
+             시간보다 넉넉히** 잡아야 한다.
+        """
         if (self.phase == self.PASS
-                and self.target_missing_seconds(now)
-                >= self.active_target_lost_seconds):
-            gone = self.target_missing_seconds(now)
+                and now - self.phase_started >= self.active_pass_seconds):
+            held = now - self.phase_started
             label = self.target_label
             self.phase = self.IDLE
             self.cooldown_until = now + self.cfg["cooldown_seconds"]
@@ -191,9 +213,14 @@ class OvertakeBehavior:
             self.target_label = None
             self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
             self.active_pass_offset_px = 0.0
+            self.active_pass_seconds = self.cfg.get("pass_seconds", 0.0)
             self.offset_source = "idle"
-            self.last_reason = f"{label} gone({gone:.1f}s) -> lane center"
+            self.last_reason = f"label{label} pass done({held:.1f}s) -> lane center"
         return self.phase
+
+    def elapsed(self, now):
+        """현재 PASS 를 유지한 시간(초). 진단용."""
+        return max(0.0, now - self.phase_started) if self.active else 0.0
 
     def offset(self, now):
         if self.phase == self.PASS:
