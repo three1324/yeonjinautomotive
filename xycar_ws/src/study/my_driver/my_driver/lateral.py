@@ -77,8 +77,8 @@ class OvertakeBehavior:
        실선을 넘을 수 있다.
     """
 
-    IDLE, PASS = range(2)
-    NAMES = ("IDLE", "PASS")
+    IDLE, PASS, RECOVER = range(3)
+    NAMES = ("IDLE", "PASS", "RECOVER")
 
     def __init__(self, cfg):
         self.cfg = cfg
@@ -206,25 +206,60 @@ class OvertakeBehavior:
         if (self.phase == self.PASS
                 and now - self.phase_started >= self.active_pass_seconds):
             held = now - self.phase_started
-            label = self.target_label
-            self.phase = self.IDLE
-            self.cooldown_until = now + self.cfg["cooldown_seconds"]
-            self.target_last_seen_at = None
-            self.target_label = None
-            self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
-            self.active_pass_offset_px = 0.0
-            self.active_pass_seconds = self.cfg.get("pass_seconds", 0.0)
-            self.offset_source = "idle"
-            self.last_reason = f"label{label} pass done({held:.1f}s) -> lane center"
+            recover = float(self.cfg.get("recover_seconds", 0.0))
+            if recover > 0.0:
+                # 반대쪽을 짧게 겨냥해 자세를 세운다. 곧바로 0 으로 놓으면
+                # 비스듬한 자세 그대로 흘러 중앙을 지나친다.
+                self.phase, self.phase_started = self.RECOVER, now
+                self.last_reason = (
+                    f"label{self.target_label} pass done({held:.1f}s)"
+                    f" -> recover {recover:.1f}s")
+            else:
+                self._to_idle(now, f"label{self.target_label} pass done({held:.1f}s)")
+        elif (self.phase == self.RECOVER
+              and now - self.phase_started
+              >= float(self.cfg.get("recover_seconds", 0.0))):
+            self._to_idle(now, "recover done")
         return self.phase
+
+    def _to_idle(self, now, why):
+        self.phase = self.IDLE
+        self.cooldown_until = now + self.cfg["cooldown_seconds"]
+        self.target_last_seen_at = None
+        self.target_label = None
+        self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
+        self.active_pass_offset_px = 0.0
+        self.active_pass_seconds = self.cfg.get("pass_seconds", 0.0)
+        self.offset_source = "idle"
+        self.last_reason = why + " -> lane center"
 
     def elapsed(self, now):
         """현재 PASS 를 유지한 시간(초). 진단용."""
         return max(0.0, now - self.phase_started) if self.active else 0.0
 
     def offset(self, now):
+        """목표 오프셋(px). **부호가 direction 과 반대다.**
+
+        ────────────────────────────────────────────────────────────
+        [사용자 2026-08-24 수정] 이식 직후 회피 방향이 반대였다.
+
+        target_offset 의 규약은 이 저장소 기준으로
+            target_offset > 0  ->  트랙중앙이 화면 오른쪽  ->  차는 트랙 **왼쪽**
+        인데, direction 은 팀원 규약대로 **+1 = 차를 오른쪽으로**다.
+        두 규약이 반대라 그대로 내보내면 피하겠다는 쪽의 정반대로 간다.
+        여기서만 뒤집는다 — direction 자체는 로그·시각화(ot_dir)에
+        이미 "+1=오른쪽"으로 쓰이고 있어서 그쪽을 건드리면 더 헷갈린다.
+
+        RECOVER 는 그 반대 부호다. 회피를 끝내고 목표를 곧바로 0 으로
+        놓으면 차가 비스듬한 자세 그대로 관성으로 흘러 중앙을 지나친다.
+        짧게(recover_sec) 반대쪽을 겨냥해 자세를 세운 뒤 0 으로 간다.
+        ────────────────────────────────────────────────────────────
+        """
         if self.phase == self.PASS:
-            return self.direction * self.active_pass_offset_px
+            return -self.direction * self.active_pass_offset_px
+        if self.phase == self.RECOVER:
+            return (self.direction * self.active_pass_offset_px
+                    * self.cfg.get("recover_ratio", 1.0))
         return 0.0
 
     def shift_time(self, seconds):

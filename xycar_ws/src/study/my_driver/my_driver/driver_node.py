@@ -240,6 +240,9 @@ class DriverNode(Node):
                 ("overtake.pass_sec", 2.0),
                 ("overtake.avanten_pass_sec", 2.0),
                 ("overtake.ionic5_pass_sec", 1.0),
+                # 회피 직후 **반대쪽**을 짧게 경유해 자세를 세운다.
+                ("overtake.recover_sec", 0.3),
+                ("overtake.recover_ratio", 1.0),
                 ("overtake.early_conf", 0.90),
                 ("overtake.normal_conf", 0.80),
                 ("overtake.avanten_early_ratio", 0.105),
@@ -336,6 +339,8 @@ class DriverNode(Node):
                 },
                 "cooldown_seconds": g("overtake.cooldown_sec").value,
                 "pass_seconds": g("overtake.pass_sec").value,
+                "recover_seconds": g("overtake.recover_sec").value,
+                "recover_ratio": g("overtake.recover_ratio").value,
                 "pass_seconds_by_label": {
                     1: g("overtake.avanten_pass_sec").value,
                     2: g("overtake.ionic5_pass_sec").value,
