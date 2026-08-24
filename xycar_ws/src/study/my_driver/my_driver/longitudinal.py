@@ -40,6 +40,7 @@ class LongitudinalPlanner:
         quality_lo, quality_factor_min,
         cone_n_lo, cone_n_hi, cone_factor_min,
         overtake_factor=0.7,
+        vehicle_seen_factor=1.0,
         curve_preview_lo=60.0,
         curve_preview_hi=260.0,
         curve_preview_factor_min=0.55,
@@ -68,6 +69,9 @@ class LongitudinalPlanner:
         # 이 구간에서 우리가 가진 유일한 전방 정보는 카메라 bbox 뿐이라
         # (라이다 상한을 제거했다 — 모듈 docstring 참고) 명시적으로 눌러둔다.
         self.overtake_factor = overtake_factor
+        # 방해차량이 **보이기만 하면** 걸리는 감속. 회피 기동 여부와
+        # 무관하다 — 앞에 차가 있다는 것 자체로 여유를 둔다. 1.0 = 끔다.
+        self.vehicle_seen_factor = vehicle_seen_factor
         # 선행 곱률 감속 — 곱선 **진입 전**에 미리 줄이는 항.
         self.curve_preview_lo = curve_preview_lo
         self.curve_preview_hi = curve_preview_hi
@@ -88,7 +92,8 @@ class LongitudinalPlanner:
         return None
 
     def update(self, lane_valid, offset_near, offset_far, quality,
-               cone_n, overtake_active=False, curve_px=0.0):
+               cone_n, overtake_active=False, curve_px=0.0,
+               vehicle_seen=False):
         """목표 속도를 반환한다 (xycar_motor 의 speed 단위)."""
         v = self.base_speed
         reasons = []
@@ -140,6 +145,11 @@ class LongitudinalPlanner:
         if f < 0.99:
             reasons.append(f"cone(x{cone_n})")
         v *= f
+
+        # 3-b) 방해차량이 보임 — 기동 여부와 무관하게 걸린다.
+        if vehicle_seen and self.vehicle_seen_factor < 1.0:
+            v *= self.vehicle_seen_factor
+            reasons.append("vehicle")
 
         # 4) 회피 기동 중 — 트랙 반쪽에 붙어 달리는 중이라 여유가 없다
         if overtake_active:

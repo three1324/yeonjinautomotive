@@ -301,6 +301,8 @@ class DriverNode(Node):
                 ("speed.cone_n_hi", 8.0),
                 ("speed.cone_factor_min", 0.6),
                 ("speed.overtake_factor", 0.7),
+                # 방해차량이 보이기만 하면 걸리는 감속(1.0 = 끔).
+                ("speed.vehicle_seen_factor", 0.9),
                 ("speed.kick", 7.0),
                 # 출발 직후 이만큼은 저속을 유지한다(0 = 끔다).
                 ("speed.startup_hold_sec", 0.5),
@@ -433,6 +435,7 @@ class DriverNode(Node):
             cone_n_hi=g("speed.cone_n_hi").value,
             cone_factor_min=g("speed.cone_factor_min").value,
             overtake_factor=g("speed.overtake_factor").value,
+            vehicle_seen_factor=g("speed.vehicle_seen_factor").value,
         )
         self.steering = SteeringController(
             k_lat=g("steer.k_lat").value,
@@ -804,6 +807,7 @@ class DriverNode(Node):
             ref.quality, self.obs.cone_n,
             overtake_active=self.lateral.overtake.active,
             curve_px=self.obs.curve_px,
+            vehicle_seen=self.obs.car_present,
         )
 
         # ── 신호등 접근 감속 (2026-08-24) ──
