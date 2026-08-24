@@ -993,12 +993,28 @@ driver_node:
       # 회피를 마치고 목표를 곷바로 0 으로 놓으면, 차가 비스듬한 자세
       # 그대로 관성으로 흘러 중앙을 지나친다. 짧게 **반대쪽**을 결려
       # 자세를 세운 뒤 0 으로 간다.
-      recover_sec: 0.5
+      recover_sec: 0.3
+      avanten_recover_sec: 0.3
+      ionic5_recover_sec: 0.3
       # ↑ [2026-08-24] 0.3 -> **0.5**. 아래 recover_kick_sec 을 0.5 로
       #   올렸는데 위상 길이가 0.3 이면 킵이 잘려서 같이 늘렸다.
       recover_ratio: 1.0       # 1.0 = 회피량과 같은 크기로 반대쪽
-      kick_sec: 0.25           # 진입(PASS)  [2026-08-24] 0.3 -> 0.25
-      recover_kick_sec: 0.45   # 복귀(RECOVER) [2026-08-24] 0.5 -> 0.45
+      # --- 진입 풀록 (모델별) ---
+      kick_sec: 0.25           # 모델 미상일 때의 기본값
+      avanten_kick_sec: 0.20
+      ionic5_kick_sec: 0.25
+
+      # --- 복귀 킵은 **2단**이다 (사용자 2026-08-24) ---
+      #   1단: recover_kick1_sec 동안 recover_kick1_deg 로 자세를 세우고
+      #   2단: recover_kick2_sec 동안 recover_kick2_deg 로 완화해 넘긴다.
+      #   한 단으로 풀록만 길게 주면 되돌아오다가 **반대 차선으로
+      #   넘어간다.** 급하게 세우고 부드럽게 놀아주는 모양이다.
+      #   2단까지 합이 0.25s 로 recover_sec(0.3) 보다 짧다 — 마지막
+      #   0.05s 는 인지 기반 제어로 넘어간다(개루프 탈출).
+      recover_kick1_sec: 0.15
+      recover_kick1_deg: 35.0
+      recover_kick2_sec: 0.10
+      recover_kick2_deg: 15.0
       # ↑ [사용자 2026-08-24] 0.1 -> **0.3** (+0.2초).
       #   ⚠️ 이 동안 인지를 아예 안 보는 **개루프**다.
       #      speed 20 기준 0.3초면 약 48cm 를 풀록으로 진행한다

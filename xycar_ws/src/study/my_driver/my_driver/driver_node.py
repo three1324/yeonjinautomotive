@@ -243,11 +243,19 @@ class DriverNode(Node):
                 ("overtake.ionic5_pass_sec", 1.0),
                 # 회피 직후 **반대쪽**을 짧게 경유해 자세를 세운다.
                 ("overtake.recover_sec", 0.3),
+                ("overtake.avanten_recover_sec", 0.3),
+                ("overtake.ionic5_recover_sec", 0.3),
                 ("overtake.recover_ratio", 1.0),
                 # 진입·복귀 첫 순간에 풀록을 때리는 시간. 0 이면 끔다.
-                ("overtake.kick_sec", 0.1),
-                # 복귀(RECOVER) 쪽 풀록 시간. 진입과 따로 둔다.
-                ("overtake.recover_kick_sec", 0.1),
+                ("overtake.kick_sec", 0.25),
+                # 진입 풀록 시간 — 모델별.
+                ("overtake.avanten_kick_sec", 0.20),
+                ("overtake.ionic5_kick_sec", 0.25),
+                # 복귀 킵은 **2단**이다: 1단 풀록 -> 2단 완화각.
+                ("overtake.recover_kick1_sec", 0.15),
+                ("overtake.recover_kick1_deg", 35.0),
+                ("overtake.recover_kick2_sec", 0.10),
+                ("overtake.recover_kick2_deg", 15.0),
                 # 방금 회피한 라벨이 이만큼 안 보여야 재발동 가능.
                 ("overtake.rearm_sec", 0.5),
                 ("overtake.early_conf", 0.90),
@@ -348,6 +356,10 @@ class DriverNode(Node):
                 "cooldown_seconds": g("overtake.cooldown_sec").value,
                 "pass_seconds": g("overtake.pass_sec").value,
                 "recover_seconds": g("overtake.recover_sec").value,
+                "recover_seconds_by_label": {
+                    1: g("overtake.avanten_recover_sec").value,
+                    2: g("overtake.ionic5_recover_sec").value,
+                },
                 "recover_ratio": g("overtake.recover_ratio").value,
                 "pass_seconds_by_label": {
                     1: g("overtake.avanten_pass_sec").value,
@@ -357,8 +369,17 @@ class DriverNode(Node):
             enable_overtake=g("lateral.enable_overtake").value,
             rearm_sec=g("overtake.rearm_sec").value,
         )
+        # 진입 풀록 시간(모델별). 모델 미상이면 kick_sec.
         self.overtake_kick_sec = g("overtake.kick_sec").value
-        self.overtake_recover_kick_sec = g("overtake.recover_kick_sec").value
+        self.overtake_kick_by_label = {
+            1: g("overtake.avanten_kick_sec").value,
+            2: g("overtake.ionic5_kick_sec").value,
+        }
+        # 복귀 2단 킵 (전 모델 공통)
+        self.rk1_sec = g("overtake.recover_kick1_sec").value
+        self.rk1_deg = g("overtake.recover_kick1_deg").value
+        self.rk2_sec = g("overtake.recover_kick2_sec").value
+        self.rk2_deg = g("overtake.recover_kick2_deg").value
         # staged_vehicle_entry 문턱. 모델별로 height_ratio 가 다르다.
         self.entry_cfg = {
             "early_conf": g("overtake.early_conf").value,
@@ -796,10 +817,21 @@ class DriverNode(Node):
         if ot.active:
             el = ot.elapsed(now_sec)
             lim = self.steering.angle_limit
-            if ot.phase == ot.PASS and el < self.overtake_kick_sec:
-                kick = -ot.direction * lim
-            elif ot.phase == ot.RECOVER and el < self.overtake_recover_kick_sec:
-                kick = ot.direction * lim
+            lbl = ot.target_label
+            if ot.phase == ot.PASS:
+                # 진입: 모델별 시간만큼 풀록.
+                dur = self.overtake_kick_by_label.get(
+                    lbl, self.overtake_kick_sec)
+                if el < dur:
+                    kick = -ot.direction * lim
+            elif ot.phase == ot.RECOVER:
+                # 복귀: **2단**이다. 풀록으로 자세를 세운 뒤 완화각으로
+                # 넘겨야 반대쪽으로 튀지 않는다. 한 단으로 풀록만 길게
+                # 주면 되돌아오다가 반대 차선으로 넘어간다.
+                if el < self.rk1_sec:
+                    kick = ot.direction * min(self.rk1_deg, lim)
+                elif el < self.rk1_sec + self.rk2_sec:
+                    kick = ot.direction * min(self.rk2_deg, lim)
 
         if kick is not None:
             angle = self.steering.follow_external(dt, kick)

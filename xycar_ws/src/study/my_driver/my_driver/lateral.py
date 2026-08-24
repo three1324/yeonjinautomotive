@@ -93,6 +93,7 @@ class OvertakeBehavior:
         self.active_target_lost_seconds = cfg["target_lost_seconds"]
         self.active_pass_offset_px = 0.0
         self.active_pass_seconds = cfg.get("pass_seconds", 0.0)
+        self.active_recover_seconds = cfg.get("recover_seconds", 0.0)
         self.offset_source = "idle"
         self.last_reason = ""
 
@@ -122,6 +123,7 @@ class OvertakeBehavior:
         self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
         self.active_pass_offset_px = 0.0
         self.active_pass_seconds = self.cfg.get("pass_seconds", 0.0)
+        self.active_recover_seconds = self.cfg.get("recover_seconds", 0.0)
         self.offset_source = "idle"
 
     def trigger(self, now, center_x, image_width, target_label=None,
@@ -163,6 +165,10 @@ class OvertakeBehavior:
         per_sec = self.cfg.get("pass_seconds_by_label", {})
         self.active_pass_seconds = float(
             per_sec.get(target_label, self.cfg.get("pass_seconds", 0.0)))
+        # 복귀 위상 길이도 모델별이다.
+        per_rec = self.cfg.get("recover_seconds_by_label", {})
+        self.active_recover_seconds = float(
+            per_rec.get(target_label, self.cfg.get("recover_seconds", 0.0)))
         source = "dashed_lane" if direction_override is not None else "screen_fallback"
         self.offset_source = source + ":" + str(target_label or "vehicle")
         move = "right" if self.direction > 0.0 else "left"
@@ -206,7 +212,7 @@ class OvertakeBehavior:
         if (self.phase == self.PASS
                 and now - self.phase_started >= self.active_pass_seconds):
             held = now - self.phase_started
-            recover = float(self.cfg.get("recover_seconds", 0.0))
+            recover = float(self.active_recover_seconds)
             if recover > 0.0:
                 # 반대쪽을 짧게 겨냥해 자세를 세운다. 곧바로 0 으로 놓으면
                 # 비스듬한 자세 그대로 흘러 중앙을 지나친다.
@@ -218,7 +224,7 @@ class OvertakeBehavior:
                 self._to_idle(now, f"label{self.target_label} pass done({held:.1f}s)")
         elif (self.phase == self.RECOVER
               and now - self.phase_started
-              >= float(self.cfg.get("recover_seconds", 0.0))):
+              >= float(self.active_recover_seconds)):
             self._to_idle(now, "recover done")
         return self.phase
 
@@ -230,6 +236,7 @@ class OvertakeBehavior:
         self.active_target_lost_seconds = self.cfg["target_lost_seconds"]
         self.active_pass_offset_px = 0.0
         self.active_pass_seconds = self.cfg.get("pass_seconds", 0.0)
+        self.active_recover_seconds = self.cfg.get("recover_seconds", 0.0)
         self.offset_source = "idle"
         self.last_reason = why + " -> lane center"
 
