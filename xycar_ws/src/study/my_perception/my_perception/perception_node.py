@@ -84,6 +84,12 @@ class PerceptionNode(Node):
                 ("lane.min_span", 20),
                 ("lane.hold_frames", 15),
                 ("lane.half_alpha", 0.05),
+                # 반폭 고정 (2026-08-24). lock_frames 만큼 모아 중앙값으로
+                # 잠그고, 그 뒤로는 절대 갱신하지 않는다. *_px > 0 이면
+                # 학습 없이 그 값으로 완전 고정.
+                ("lane.half_lock_frames", 30),
+                ("lane.half_near_px", 0.0),
+                ("lane.half_far_px", 0.0),
                 ("lane.max_center_offset_px", 480.0),
                 ("lane.max_jump_px", 250.0),
                 # 신호등 투표
@@ -234,6 +240,9 @@ class PerceptionNode(Node):
             min_span=g("lane.min_span").value,
             hold_frames=g("lane.hold_frames").value,
             half_alpha=g("lane.half_alpha").value,
+            half_lock_frames=g("lane.half_lock_frames").value,
+            half_near_px=g("lane.half_near_px").value,
+            half_far_px=g("lane.half_far_px").value,
             max_center_offset_px=g("lane.max_center_offset_px").value,
             max_jump_px=g("lane.max_jump_px").value,
         )

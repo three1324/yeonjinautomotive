@@ -25,9 +25,12 @@ ROS/ultralytics 의존성 없음 (numpy만). 영상으로 오프라인 검증하
 4. solid_line은 좌/우를 반드시 분리한다.
    합쳐서 중앙값을 내면 좌우 경계선이 섞여 엉뚱한 값이 나온다.
 
-5. 차로폭은 상수가 아니다.
+5. 차로폭은 상수가 아니다 — 다만 **학습값을 계속 갱신하지도 않는다.**
    원근 때문에 행마다 크게 변한다. 양쪽이 보이는 프레임에서 행별 반폭을
-   EMA로 학습해두고, 한쪽만 보일 때 그 값으로 보완한다.
+   모아 **중앙값으로 잠그고**(half_lock_frames), 한쪽만 보일 때 그 값으로
+   보완한다. 예전에는 EMA 로 계속 갱신했는데, 이 값은 한쪽만 보일 때
+   중앙 추정에 **그대로 편향으로 들어가므로** 누적되면 위험하다
+   (2026-08-24). half_near_px/half_far_px 로 완전 고정도 가능하다.
 ────────────────────────────────────────────────────────────────────────
 """
 
@@ -193,6 +196,9 @@ class LaneEstimator:
         min_span=20,
         hold_frames=15,
         half_alpha=0.05,
+        half_lock_frames=30,
+        half_near_px=0.0,
+        half_far_px=0.0,
         max_center_offset_px=480.0,
         max_jump_px=250.0,
         left_band_px=30.0,
@@ -209,7 +215,24 @@ class LaneEstimator:
         self.min_pts = min_pts
         self.min_span = min_span
         self.hold_frames = hold_frames
-        self.half_alpha = half_alpha        # 행별 반폭 EMA 계수
+        self.half_alpha = half_alpha        # 행별 반폭 EMA 계수 (lock 전에는 안 쓴다)
+        # ── 반폭을 **고정**한다 (2026-08-24) ────────────────────────────
+        # 왜: _half 는 한쪽 흰선만 보일 때 중앙을 외삽하는 기준이라
+        # (center = xl + half), 값이 틀리면 **출력에 그대로 편향으로 들어간다.**
+        # EMA(alpha 0.05)로 계속 갱신하면 그 편향이 프레임을 넘어 누적되고,
+        # 트랙 폭이 다른 구간을 지날 때마다 기준이 흔들린다.
+        #
+        #   half_near_px / half_far_px > 0  -> 그 값으로 **완전 고정**. 학습 안 함.
+        #   half_lock_frames > 0            -> 좌우 흰선을 동시에 본 프레임을
+        #                                      이만큼 모아 **중앙값**으로 잠근다.
+        #                                      잠긴 뒤에는 절대 안 바뀐다.
+        #   둘 다 0                          -> 옛 EMA 동작 (누적됨)
+        #
+        # 중앙값을 쓰는 이유: EMA 는 초반 이상치를 오래 끌고 가지만 중앙값은
+        # 표본 절반이 망가져도 버틴다. 잠그기 전에도 지금까지의 중앙값을 쓰므로
+        # 초기 프레임부터 바로 사용 가능하다.
+        self.half_lock_frames = half_lock_frames
+        self.half_fixed = {eval_near: half_near_px, eval_far: half_far_px}
         # 화면 중심에서 이만큼 넘게 벗어난 추정은 피팅 실패로 보고 기각
         self.max_center_offset_px = max_center_offset_px
         # 직전 채택값에서 이만큼 넘게 튄 추정은 기각 (물리적으로 불가능한 이동)
@@ -218,6 +241,9 @@ class LaneEstimator:
         self.left_band_px = left_band_px
 
         self._half = {eval_near: None, eval_far: None}
+        # 잠그기 전까지 모으는 표본과, 잠금 여부.
+        self._half_samples = {eval_near: [], eval_far: []}
+        self._half_locked = {eval_near: False, eval_far: False}
         # 행별로 마지막에 채택된 중앙 x. 이상치 판정의 기준.
         self._last_center = {eval_near: None, eval_far: None}
         # 좌측밴드 경로는 **별도의** 이상치 기준을 쓴다. 같은 딕셔너리를
@@ -229,6 +255,8 @@ class LaneEstimator:
 
     def reset(self):
         self._half = {self.eval_near: None, self.eval_far: None}
+        self._half_samples = {self.eval_near: [], self.eval_far: []}
+        self._half_locked = {self.eval_near: False, self.eval_far: False}
         self._last_center = {self.eval_near: None, self.eval_far: None}
         self._last_center_lb = {self.eval_near: None, self.eval_far: None}
         self._last = LaneResult(0.0, 0.0, False, 0.0)
@@ -251,6 +279,36 @@ class LaneEstimator:
             (left if float(np.median(xs)) < x_ref else right).append((xs, ys))
         return left, right
 
+    def _update_half(self, row, half):
+        """좌우 흰선을 동시에 본 프레임에서만 호출. 반폭 기준을 갱신/잠근다.
+
+        고정값이 주어졌거나 이미 잠겼으면 **아무것도 하지 않는다** — 그게
+        이 함수의 존재 이유다(누적 편향 차단).
+        """
+        if self.half_fixed.get(row, 0.0) > 0.0 or self._half_locked[row]:
+            return
+
+        if self.half_lock_frames > 0:
+            s = self._half_samples[row]
+            s.append(half)
+            # 잠그기 전에도 바로 쓸 수 있게 지금까지의 중앙값을 넣어 둔다.
+            self._half[row] = float(np.median(s))
+            if len(s) >= self.half_lock_frames:
+                self._half_locked[row] = True
+                s.clear()               # 잠근 뒤에는 표본을 들고 있을 이유가 없다
+            return
+
+        # half_lock_frames = 0 -> 옛 EMA 동작 (값이 계속 누적된다)
+        prev = self._half[row]
+        self._half[row] = half if prev is None else (
+            (1 - self.half_alpha) * prev + self.half_alpha * half
+        )
+
+    def _half_at(self, row):
+        """이 행에서 쓸 반폭. 고정값이 있으면 그것이 최우선."""
+        fixed = self.half_fixed.get(row, 0.0)
+        return fixed if fixed > 0.0 else self._half[row]
+
     def _center_at(self, row, f_dashed, f_left, f_right):
         """평가행에서 트랙 중앙 x와 quality. 행별 반폭 EMA도 갱신한다."""
         xd = float(np.polyval(f_dashed, row)) if f_dashed is not None else None
@@ -260,11 +318,7 @@ class LaneEstimator:
         mid = None
         if xl is not None and xr is not None:
             mid = (xl + xr) / 2.0
-            half = abs(xr - xl) / 2.0
-            prev = self._half[row]
-            self._half[row] = half if prev is None else (
-                (1 - self.half_alpha) * prev + self.half_alpha * half
-            )
+            self._update_half(row, abs(xr - xl) / 2.0)
 
         if xd is not None and mid is not None:
             return self._accept(row, (xd + mid) / 2.0, 1.0)
@@ -274,7 +328,7 @@ class LaneEstimator:
             return self._accept(row, mid, 0.8)
 
         # 한쪽 흰선만 보임. 학습된 반폭으로 중앙을 추정한다.
-        half = self._half[row]
+        half = self._half_at(row)
         if half is None:
             # 반폭을 아직 한 번도 학습하지 못했다 (좌우 흰선을 동시에 본 적 없음).
             # 근거 없이 추정하면 위험하므로 hold 로 넘긴다.
@@ -342,12 +396,23 @@ class LaneEstimator:
         if c_near is None and c_far is None:
             self._miss += 1
             if self._miss > self.hold_frames:
+                # ★ [2026-08-24] 급변 게이트 기준을 **버린다.**
+                #   _last_center 는 출력에 더해지는 값이 아니라 max_jump_px
+                #   판정의 기준일 뿐이다. 그런데 hold 를 포기할 만큼 오래
+                #   놓쳤다면 그 사이 차는 계속 움직였으므로, 그 기준은 이미
+                #   현실과 무관한 **stale 값**이다. 그대로 두면 차선이 정상적으로
+                #   다시 보여도 "직전 값에서 250px 넘게 튀었다"고 기각해
+                #   hold 에서 못 빠져나온다(자기 잠금).
+                #   버리면 다음 유효 관측이 무조건 채택되고, 거기서부터 다시
+                #   게이트가 선다.
+                self._last_center = {self.eval_near: None, self.eval_far: None}
+                self._last_center_lb = {self.eval_near: None, self.eval_far: None}
                 # 오프셋은 무효로 떨어뜨리되 반폭은 살려둔다 — 반폭은 이 프레임의
                 # 관측이 아니라 누적 학습값이라 차선을 놓쳤다고 사라지지 않는다.
                 self._last = LaneResult(
                     self._last.offset_near, self._last.offset_far, False, 0.0,
-                    half_near=self._half[self.eval_near] or 0.0,
-                    half_far=self._half[self.eval_far] or 0.0,
+                    half_near=self._half_at(self.eval_near) or 0.0,
+                    half_far=self._half_at(self.eval_far) or 0.0,
                     offset_near_left=self._last.offset_near_left,
                     offset_far_left=self._last.offset_far_left,
                     valid_left=False,
@@ -377,8 +442,8 @@ class LaneEstimator:
             offset_far=c_far - target,
             valid=True,
             quality=min(q_near, q_far),
-            half_near=self._half[self.eval_near] or 0.0,
-            half_far=self._half[self.eval_far] or 0.0,
+            half_near=self._half_at(self.eval_near) or 0.0,
+            half_far=self._half_at(self.eval_far) or 0.0,
             offset_near_left=off_n_lb,
             offset_far_left=off_f_lb,
             valid_left=valid_left,
